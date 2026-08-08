@@ -1,6 +1,7 @@
 const http = require("http");
 const WebSocket = require("ws");
 const Groq = require("groq-sdk");
+const textToSpeech = require("@google-cloud/text-to-speech");
 const { spawn } = require("child_process");
 const ffmpegPath = require("ffmpeg-static");
 
@@ -10,7 +11,6 @@ const ffmpegPath = require("ffmpeg-static");
 
 const PORT = process.env.PORT || 3000;
 
-// CURRENT CLOUDFLARE URL FOR EXOTEL WEBSOCKET
 const PUBLIC_URL =
   "https://ai-voice-bridge-q8qv.onrender.com";
 
@@ -18,77 +18,112 @@ const WS_URL =
   PUBLIC_URL.replace("https://", "wss://");
 
 // ==================================================
-// GROQ
+// ENVIRONMENT VARIABLES
 // ==================================================
 
-// PASTE YOUR NEW GROQ API KEY BETWEEN THE QUOTES
 const GROQ_API_KEY =
   process.env.GROQ_API_KEY;
+
+const N8N_WEBHOOK_URL =
+  process.env.N8N_WEBHOOK_URL;
+
+const GOOGLE_SERVICE_ACCOUNT_JSON =
+  process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+
+if (!GROQ_API_KEY) {
+  throw new Error("GROQ_API_KEY is missing");
+}
+
+if (!N8N_WEBHOOK_URL) {
+  throw new Error("N8N_WEBHOOK_URL is missing");
+}
+
+if (!GOOGLE_SERVICE_ACCOUNT_JSON) {
+  throw new Error(
+    "GOOGLE_SERVICE_ACCOUNT_JSON is missing"
+  );
+}
+
+// ==================================================
+// GROQ
+// ==================================================
 
 const groq = new Groq({
   apiKey: GROQ_API_KEY
 });
 
 // ==================================================
-// N8N
+// GOOGLE TTS
 // ==================================================
 
-const N8N_WEBHOOK_URL =
-  process.env.N8N_WEBHOOK_URL;
+const googleCredentials =
+  JSON.parse(
+    GOOGLE_SERVICE_ACCOUNT_JSON
+  );
+
+const googleTTS =
+  new textToSpeech.TextToSpeechClient({
+    credentials: googleCredentials
+  });
 
 // ==================================================
 // HTTP SERVER
 // ==================================================
 
-const server = http.createServer((req, res) => {
+const server = http.createServer(
+  async (req, res) => {
 
-  console.log(
-    "HTTP request:",
-    req.method,
-    req.url
-  );
+    console.log(
+      "HTTP request:",
+      req.method,
+      req.url
+    );
 
-  // Health check
-  if (req.url === "/health") {
+    if (req.url === "/health") {
+
+      res.writeHead(200, {
+        "Content-Type":
+          "application/json"
+      });
+
+      res.end(
+        JSON.stringify({
+          status: "ok"
+        })
+      );
+
+      return;
+    }
 
     res.writeHead(200, {
-      "Content-Type": "application/json"
+      "Content-Type":
+        "application/json"
     });
 
     res.end(
       JSON.stringify({
-        status: "ok"
+        url: WS_URL
       })
     );
-
-    return;
   }
+);
 
-  // Exotel asks for WebSocket URL
-  res.writeHead(200, {
-    "Content-Type": "application/json"
+// ==================================================
+// WEBSOCKET
+// ==================================================
+
+const wss =
+  new WebSocket.Server({
+    server
   });
 
-  res.end(
-    JSON.stringify({
-      url: WS_URL
-    })
-  );
-});
-
 // ==================================================
-// WEBSOCKET SERVER
+// PCM -> WAV
 // ==================================================
 
-const wss = new WebSocket.Server({
-  server: server
-});
-
-// ==================================================
-// CREATE WAV FROM RAW PCM
-// ==================================================
-
-function createWav(pcmBuffer) {
+function pcmToWav(
+  pcmBuffer
+) {
 
   const sampleRate = 8000;
   const channels = 1;
@@ -97,27 +132,38 @@ function createWav(pcmBuffer) {
   const byteRate =
     sampleRate *
     channels *
-    bitsPerSample / 8;
+    bitsPerSample /
+    8;
 
   const blockAlign =
     channels *
-    bitsPerSample / 8;
+    bitsPerSample /
+    8;
 
   const wav =
     Buffer.alloc(
       44 + pcmBuffer.length
     );
 
-  wav.write("RIFF", 0);
+  wav.write(
+    "RIFF",
+    0
+  );
 
   wav.writeUInt32LE(
     36 + pcmBuffer.length,
     4
   );
 
-  wav.write("WAVE", 8);
+  wav.write(
+    "WAVE",
+    8
+  );
 
-  wav.write("fmt ", 12);
+  wav.write(
+    "fmt ",
+    12
+  );
 
   wav.writeUInt32LE(
     16,
@@ -154,7 +200,10 @@ function createWav(pcmBuffer) {
     34
   );
 
-  wav.write("data", 36);
+  wav.write(
+    "data",
+    36
+  );
 
   wav.writeUInt32LE(
     pcmBuffer.length,
@@ -170,243 +219,7 @@ function createWav(pcmBuffer) {
 }
 
 // ==================================================
-// AUDIO LEVEL / RMS
-// ==================================================
-
-function getRMS(buffer) {
-
-  if (
-    !buffer ||
-    buffer.length < 2
-  ) {
-    return 0;
-  }
-
-  let sum = 0;
-  let count = 0;
-
-  for (
-    let i = 0;
-    i + 1 < buffer.length;
-    i += 2
-  ) {
-
-    const sample =
-      buffer.readInt16LE(i);
-
-    sum +=
-      sample * sample;
-
-    count++;
-  }
-
-  if (count === 0) {
-    return 0;
-  }
-
-  return Math.sqrt(
-    sum / count
-  );
-}
-
-// ==================================================
-// GROQ SPEECH TO TEXT
-// ==================================================
-
-async function transcribeAudio(
-  pcmBuffer
-) {
-
-  console.log("");
-  console.log(
-    "Sending caller audio to Groq Whisper..."
-  );
-
-  const wav =
-    createWav(
-      pcmBuffer
-    );
-
-  const file =
-    new File(
-      [wav],
-      "caller.wav",
-      {
-        type: "audio/wav"
-      }
-    );
-
-  const transcription =
-    await groq.audio.transcriptions.create({
-
-      file: file,
-
-      model:
-        "whisper-large-v3-turbo",
-
-      language:
-        "en",
-
-      response_format:
-        "json"
-    });
-
-  const text =
-    (transcription.text || "")
-      .trim();
-
-  console.log(
-    "CALLER SAID:",
-    text
-  );
-
-  return text;
-}
-
-// ==================================================
-// N8N
-// ==================================================
-
-async function askN8N(
-  question,
-  callSid
-) {
-
-  console.log("");
-  console.log(
-    "Sending question to n8n..."
-  );
-
-  const response =
-    await fetch(
-      N8N_WEBHOOK_URL,
-      {
-        method: "POST",
-
-        headers: {
-          "Content-Type":
-            "application/json"
-        },
-
-        body: JSON.stringify({
-
-          text:
-            question,
-
-          chatInput:
-            question,
-
-          sessionId:
-            callSid
-        })
-      }
-    );
-
-  if (!response.ok) {
-
-    const error =
-      await response.text();
-
-    throw new Error(
-      `n8n HTTP ${response.status}: ${error}`
-    );
-  }
-
-  const raw =
-    await response.text();
-
-  console.log(
-    "n8n raw response:",
-    raw
-  );
-
-  let data;
-
-  try {
-
-    data =
-      JSON.parse(raw);
-
-  } catch {
-
-    throw new Error(
-      "n8n returned invalid JSON"
-    );
-  }
-
-  const answer =
-    data.output ||
-    data.text ||
-    data["name: text"] ||
-    data.answer ||
-    data.response;
-
-  if (!answer) {
-
-    throw new Error(
-      "No AI answer found in n8n response"
-    );
-  }
-
-  console.log(
-    "AI ANSWER:",
-    answer
-  );
-
-  return String(answer);
-}
-
-// ==================================================
-// GROQ TTS
-// ==================================================
-
-async function generateSpeech(
-  text
-) {
-
-  console.log("");
-  console.log(
-    "Sending AI answer to Groq TTS..."
-  );
-
-  const cleanText =
-    text
-      .replace(/\s+/g, " ")
-      .trim()
-      .slice(0, 200);
-
-  const response =
-    await groq.audio.speech.create({
-
-      model:
-        "canopylabs/orpheus-v1-english",
-
-      voice:
-        "hannah",
-
-      input:
-        cleanText,
-
-      response_format:
-        "wav"
-    });
-
-  const wavBuffer =
-    Buffer.from(
-      await response.arrayBuffer()
-    );
-
-  console.log(
-    "Groq TTS WAV received:",
-    wavBuffer.length,
-    "bytes"
-  );
-
-  return wavBuffer;
-}
-
-// ==================================================
-// CONVERT WAV -> EXOTEL PCM
+// WAV -> EXOTEL PCM
 // ==================================================
 
 function convertWavToExotelPCM(
@@ -417,7 +230,7 @@ function convertWavToExotelPCM(
     (resolve, reject) => {
 
       console.log(
-        "Converting TTS WAV to Exotel PCM..."
+        "Converting audio..."
       );
 
       const ffmpeg =
@@ -463,9 +276,7 @@ function convertWavToExotelPCM(
 
       ffmpeg.on(
         "error",
-        (error) => {
-          reject(error);
-        }
+        reject
       );
 
       ffmpeg.on(
@@ -476,7 +287,6 @@ function convertWavToExotelPCM(
 
             reject(
               new Error(
-                "FFmpeg failed: " +
                 Buffer
                   .concat(errors)
                   .toString()
@@ -523,16 +333,10 @@ function sendAudioToExotel(
     return;
   }
 
-  // 20 ms of:
-  // 8000 Hz
-  // 16-bit
-  // mono
-  //
-  // 8000 x 0.02 x 2 = 320 bytes
-
   const CHUNK_SIZE = 320;
 
   let chunkNumber = 0;
+  let timestamp = 0;
 
   for (
     let offset = 0;
@@ -549,30 +353,42 @@ function sendAudioToExotel(
         )
       );
 
-    const message = {
-
-      event:
-        "media",
-
-      stream_sid:
-        streamSid,
-
-      media: {
-
-        payload:
-          chunk.toString(
-            "base64"
-          )
-      }
-    };
-
     ws.send(
-      JSON.stringify(
-        message
-      )
+      JSON.stringify({
+
+        event: "media",
+
+        sequence_number:
+          String(
+            chunkNumber + 1
+          ),
+
+        stream_sid:
+          streamSid,
+
+        media: {
+
+          chunk:
+            String(
+              chunkNumber
+            ),
+
+          timestamp:
+            String(
+              timestamp
+            ),
+
+          payload:
+            chunk.toString(
+              "base64"
+            )
+        }
+      })
     );
 
     chunkNumber++;
+
+    timestamp += 20;
   }
 
   console.log(
@@ -581,38 +397,314 @@ function sendAudioToExotel(
     "audio chunks to Exotel."
   );
 
-  console.log(
-    "Audio sent to caller."
+  ws.send(
+    JSON.stringify({
+
+      event: "mark",
+
+      stream_sid:
+        streamSid,
+
+      mark: {
+        name:
+          "ai_response_complete"
+      }
+    })
   );
 }
 
 // ==================================================
-// PROCESS SPEECH
+// GROQ SPEECH TO TEXT
+// ==================================================
+
+async function transcribeAudio(
+  pcmBuffer
+) {
+
+  console.log(
+    "Sending caller audio to Groq Whisper..."
+  );
+
+  const wavBuffer =
+    pcmToWav(
+      pcmBuffer
+    );
+
+  const file =
+    new File(
+      [
+        wavBuffer
+      ],
+      "caller.wav",
+      {
+        type:
+          "audio/wav"
+      }
+    );
+
+  const transcription =
+    await groq.audio.transcriptions.create(
+      {
+        file,
+
+        model:
+          "whisper-large-v3-turbo",
+
+        language:
+          "en",
+
+        response_format:
+          "text"
+      }
+    );
+
+  const text =
+    String(
+      transcription
+    )
+      .trim();
+
+  console.log(
+    "TRANSCRIPTION:",
+    text
+  );
+
+  return text;
+}
+
+// ==================================================
+// N8N
+// ==================================================
+
+async function askN8N(
+  question
+) {
+
+  console.log(
+    "Sending question to n8n..."
+  );
+
+  const response =
+    await fetch(
+      N8N_WEBHOOK_URL,
+      {
+        method: "POST",
+
+        headers: {
+          "Content-Type":
+            "application/json"
+        },
+
+        body:
+          JSON.stringify({
+
+            text:
+              question,
+
+            chatInput:
+              question
+          })
+      }
+    );
+
+  if (!response.ok) {
+
+    throw new Error(
+      `n8n HTTP ${response.status}`
+    );
+  }
+
+  const raw =
+    await response.text();
+
+  console.log(
+    "n8n raw response:",
+    raw
+  );
+
+  let data;
+
+  try {
+
+    data =
+      JSON.parse(
+        raw
+      );
+
+  } catch {
+
+    throw new Error(
+      "n8n returned invalid JSON"
+    );
+  }
+
+  const answer =
+    data.output ||
+    data.text ||
+    data["name: text"] ||
+    data.response ||
+    data.answer;
+
+  if (!answer) {
+
+    throw new Error(
+      "No AI answer found in n8n response"
+    );
+  }
+
+  return String(
+    answer
+  );
+}
+
+// ==================================================
+// GOOGLE TTS
+// ==================================================
+
+async function speakAnswer(
+  ws,
+  streamSid,
+  answer
+) {
+
+  console.log(
+    "Sending AI answer to Google TTS..."
+  );
+
+  const text =
+    String(answer)
+      .replace(
+        /\s+/g,
+        " "
+      )
+      .trim()
+      .slice(
+        0,
+        500
+      );
+
+  const request = {
+
+    input: {
+      text
+    },
+
+    voice: {
+
+      languageCode:
+        "en-IN",
+
+      name:
+        "en-IN-Standard-A"
+    },
+
+    audioConfig: {
+
+      audioEncoding:
+        "LINEAR16",
+
+      sampleRateHertz:
+        8000,
+
+      speakingRate:
+        1.05,
+
+      volumeGainDb:
+        0
+    }
+  };
+
+  const [
+    response
+  ] =
+    await googleTTS
+      .synthesizeSpeech(
+        request
+      );
+
+  if (
+    !response.audioContent
+  ) {
+
+    throw new Error(
+      "Google TTS returned no audio"
+    );
+  }
+
+  const wavBuffer =
+    Buffer.from(
+      response.audioContent
+    );
+
+  console.log(
+    "Google TTS audio received:",
+    wavBuffer.length,
+    "bytes"
+  );
+
+  const pcmBuffer =
+    await convertWavToExotelPCM(
+      wavBuffer
+    );
+
+  console.log(
+    "Converted PCM:",
+    pcmBuffer.length,
+    "bytes"
+  );
+
+  sendAudioToExotel(
+    ws,
+    streamSid,
+    pcmBuffer
+  );
+
+  console.log(
+    "ANSWER SENT TO CALLER"
+  );
+}
+
+// ==================================================
+// PROCESS CALLER SPEECH
 // ==================================================
 
 async function processSpeech(
   ws,
   streamSid,
-  callSid,
-  pcmBuffer
+  audioChunks
 ) {
 
   try {
 
-    console.log("");
-    console.log(
-      "========================================"
-    );
+    if (
+      audioChunks.length === 0
+    ) {
+      return;
+    }
+
+    const pcmBuffer =
+      Buffer.concat(
+        audioChunks
+      );
 
     console.log(
-      "PROCESSING CALLER SPEECH"
+      "Speech buffer:",
+      pcmBuffer.length,
+      "bytes"
     );
 
-    console.log(
-      "========================================"
-    );
+    // Ignore extremely short audio
+    if (
+      pcmBuffer.length <
+      8000
+    ) {
 
-    // 1. SPEECH TO TEXT
+      console.log(
+        "Speech too short."
+      );
+
+      return;
+    }
 
     const question =
       await transcribeAudio(
@@ -628,72 +720,41 @@ async function processSpeech(
       return;
     }
 
-    // 2. N8N
+    console.log(
+      "CALLER SAID:",
+      question
+    );
 
     const answer =
       await askN8N(
-        question,
-        callSid
-      );
-
-    // 3. TTS
-
-    const wav =
-      await generateSpeech(
-        answer
-      );
-
-    // 4. CONVERT
-
-    const pcm =
-      await convertWavToExotelPCM(
-        wav
+        question
       );
 
     console.log(
-      "Converted PCM:",
-      pcm.length,
-      "bytes"
+      "AI ANSWER:",
+      answer
     );
 
-    // 5. SEND TO CALLER
-
-    sendAudioToExotel(
+    await speakAnswer(
       ws,
       streamSid,
-      pcm
-    );
-
-    console.log("");
-    console.log(
-      "========================================"
-    );
-
-    console.log(
-      "ANSWER SENT TO CALLER"
-    );
-
-    console.log(
-      "========================================"
+      answer
     );
 
   } catch (error) {
 
-    console.error("");
-    console.error(
+    console.log(
       "VOICE PROCESSING ERROR:"
     );
 
-    console.error(
+    console.log(
       error.message
     );
-
-    console.error("");
   }
 }
 
 // ==================================================
-// EXOTEL WEBSOCKET
+// EXOTEL CONNECTION
 // ==================================================
 
 wss.on(
@@ -704,35 +765,26 @@ wss.on(
     console.log(
       "================================"
     );
-
     console.log(
       "EXOTEL WEBSOCKET CONNECTED"
     );
-
     console.log(
       "================================"
     );
 
-    let streamSid =
-      null;
+    let streamSid = null;
 
-    let callSid =
-      null;
+    let audioChunks = [];
 
-    let audioChunks =
-      [];
+    let processing = false;
 
-    let speechActive =
-      false;
+    let lastSpeechTime = 0;
 
-    let silenceMs =
-      0;
+    let speechTimer = null;
 
-    let processing =
-      false;
-
-    let totalAudioBytes =
-      0;
+    // ----------------------------------------------
+    // MESSAGE
+    // ----------------------------------------------
 
     ws.on(
       "message",
@@ -745,6 +797,11 @@ wss.on(
               data.toString()
             );
 
+          console.log(
+            "Event:",
+            message.event
+          );
+
           // ========================================
           // CONNECTED
           // ========================================
@@ -753,10 +810,6 @@ wss.on(
             message.event ===
             "connected"
           ) {
-
-            console.log(
-              "Event: connected"
-            );
 
             console.log(
               "Exotel WebSocket connected."
@@ -778,11 +831,8 @@ wss.on(
               message.stream_sid ||
               message.start?.stream_sid;
 
-            callSid =
-              message.start?.call_sid;
-
             console.log(
-              "Event: start"
+              "Stream started."
             );
 
             console.log(
@@ -792,13 +842,15 @@ wss.on(
 
             console.log(
               "Call SID:",
-              callSid
+              message.start?.call_sid
             );
 
             console.log(
               "Audio format:",
               message.start?.media_format
             );
+
+            audioChunks = [];
 
             return;
           }
@@ -813,187 +865,138 @@ wss.on(
           ) {
 
             if (
-              !message.media?.payload
-            ) {
-              return;
-            }
-
-            const audio =
-              Buffer.from(
-                message.media.payload,
-                "base64"
-              );
-
-            console.log(
-              "Audio received:",
-              audio.length,
-              "bytes"
-            );
-
-            if (processing) {
-              return;
-            }
-
-            const rms =
-              getRMS(audio);
-
-            console.log(
-              "Audio level:",
-              Math.round(rms)
-            );
-
-            const SPEECH_THRESHOLD =
-              500;
-
-            const isSpeaking =
-              rms >
-              SPEECH_THRESHOLD;
-
-            // ======================================
-            // SPEECH
-            // ======================================
-
-            if (isSpeaking) {
-
-              speechActive =
-                true;
-
-              silenceMs =
-                0;
-
-              audioChunks.push(
-                audio
-              );
-
-              totalAudioBytes +=
-                audio.length;
-
-              return;
-            }
-
-            // ======================================
-            // SILENCE
-            // ======================================
-
-            if (
-              speechActive
+              message.media?.payload
             ) {
 
-              audioChunks.push(
-                audio
-              );
-
-              totalAudioBytes +=
-                audio.length;
-
-              silenceMs += 20;
-            }
-
-            // ======================================
-            // END OF SPEECH
-            // ======================================
-
-            if (
-              speechActive &&
-              silenceMs >= 700
-            ) {
-
-              console.log(
-                "End of speech detected."
-              );
-
-              speechActive =
-                false;
-
-              silenceMs =
-                0;
-
-              const completeAudio =
-                Buffer.concat(
-                  audioChunks
+              const audio =
+                Buffer.from(
+                  message.media.payload,
+                  "base64"
                 );
 
-              audioChunks =
-                [];
+              audioChunks.push(
+                audio
+              );
 
-              totalAudioBytes =
-                0;
+              console.log(
+                "Audio received:",
+                audio.length,
+                "bytes"
+              );
 
-              if (
-                completeAudio.length <
-                4000
+              // ----------------------------------
+              // Calculate simple audio level
+              // ----------------------------------
+
+              let sum = 0;
+
+              for (
+                let i = 0;
+                i < audio.length;
+                i += 2
               ) {
 
-                console.log(
-                  "Audio too short, ignoring."
-                );
+                if (
+                  i + 1 >=
+                  audio.length
+                ) {
+                  break;
+                }
 
-                return;
+                const sample =
+                  audio.readInt16LE(
+                    i
+                  );
+
+                sum +=
+                  Math.abs(
+                    sample
+                  );
               }
 
-              processing =
-                true;
-
-              await processSpeech(
-                ws,
-                streamSid,
-                callSid,
-                completeAudio
-              );
-
-              processing =
-                false;
-
-              return;
-            }
-
-            // ======================================
-            // MAXIMUM AUDIO LENGTH
-            // ======================================
-
-            const MAX_AUDIO_BYTES =
-              8 *
-              8000 *
-              2;
-
-            if (
-              totalAudioBytes >
-              MAX_AUDIO_BYTES
-            ) {
+              const level =
+                audio.length > 0
+                  ? sum /
+                    (audio.length / 2)
+                  : 0;
 
               console.log(
-                "Maximum speech length reached."
+                "Audio level:",
+                Math.round(level)
               );
 
-              speechActive =
-                false;
+              // ----------------------------------
+              // Speech detected
+              // ----------------------------------
 
-              silenceMs =
-                0;
+              if (
+                level > 150
+              ) {
 
-              const completeAudio =
-                Buffer.concat(
-                  audioChunks
+                lastSpeechTime =
+                  Date.now();
+              }
+
+              // ----------------------------------
+              // Reset end-of-speech timer
+              // ----------------------------------
+
+              clearTimeout(
+                speechTimer
+              );
+
+              speechTimer =
+                setTimeout(
+                  async () => {
+
+                    if (
+                      processing
+                    ) {
+                      return;
+                    }
+
+                    const silenceTime =
+                      Date.now() -
+                      lastSpeechTime;
+
+                    if (
+                      silenceTime <
+                      900
+                    ) {
+                      return;
+                    }
+
+                    if (
+                      audioChunks.length ===
+                      0
+                    ) {
+                      return;
+                    }
+
+                    processing =
+                      true;
+
+                    const speech =
+                      audioChunks;
+
+                    audioChunks = [];
+
+                    console.log(
+                      "END OF SPEECH DETECTED"
+                    );
+
+                    await processSpeech(
+                      ws,
+                      streamSid,
+                      speech
+                    );
+
+                    processing =
+                      false;
+
+                  },
+                  1000
                 );
-
-              audioChunks =
-                [];
-
-              totalAudioBytes =
-                0;
-
-              processing =
-                true;
-
-              await processSpeech(
-                ws,
-                streamSid,
-                callSid,
-                completeAudio
-              );
-
-              processing =
-                false;
             }
 
             return;
@@ -1017,6 +1020,23 @@ wss.on(
           }
 
           // ========================================
+          // MARK
+          // ========================================
+
+          if (
+            message.event ===
+            "mark"
+          ) {
+
+            console.log(
+              "Exotel mark:",
+              message.mark?.name
+            );
+
+            return;
+          }
+
+          // ========================================
           // STOP
           // ========================================
 
@@ -1025,32 +1045,38 @@ wss.on(
             "stop"
           ) {
 
-            console.log(
-              "Event: stop"
+            clearTimeout(
+              speechTimer
             );
 
-            audioChunks =
-              [];
-
-            totalAudioBytes =
-              0;
+            console.log(
+              "Stream stopped."
+            );
 
             return;
           }
 
         } catch (error) {
 
-          console.error(
-            "WebSocket message error:",
+          console.log(
+            "Message parsing error:",
             error.message
           );
         }
       }
     );
 
+    // ----------------------------------------------
+    // CLOSE
+    // ----------------------------------------------
+
     ws.on(
       "close",
       () => {
+
+        clearTimeout(
+          speechTimer
+        );
 
         console.log(
           "Exotel WebSocket disconnected."
@@ -1058,11 +1084,15 @@ wss.on(
       }
     );
 
+    // ----------------------------------------------
+    // ERROR
+    // ----------------------------------------------
+
     ws.on(
       "error",
       (error) => {
 
-        console.error(
+        console.log(
           "WebSocket error:",
           error.message
         );
@@ -1072,7 +1102,7 @@ wss.on(
 );
 
 // ==================================================
-// START SERVER
+// START
 // ==================================================
 
 server.listen(
@@ -1084,11 +1114,9 @@ server.listen(
     console.log(
       "--------------------------------"
     );
-
     console.log(
       "AI VOICE BRIDGE"
     );
-
     console.log(
       "--------------------------------"
     );
@@ -1106,24 +1134,6 @@ server.listen(
     console.log(
       "Public WebSocket:",
       WS_URL
-    );
-
-    console.log("");
-
-    console.log(
-      "Groq API key:",
-      GROQ_API_KEY !==
-      "PASTE_YOUR_NEW_GROQ_KEY_HERE"
-        ? "FOUND"
-        : "MISSING"
-    );
-
-    console.log(
-      "n8n webhook:",
-      N8N_WEBHOOK_URL !==
-      "YOUR_N8N_WEBHOOK_URL_HERE"
-        ? "FOUND"
-        : "MISSING"
     );
 
     console.log("");
