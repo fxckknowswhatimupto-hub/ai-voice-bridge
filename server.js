@@ -34,7 +34,7 @@ const groq = new Groq({
 // ==================================================
 
 const N8N_WEBHOOK_URL =
-  "https://voltage-immediate-activated-jesse.trycloudflare.com/webhook/ai-phone";
+  process.env.N8N_WEBHOOK_URL;
 
 // ==================================================
 // HTTP SERVER
