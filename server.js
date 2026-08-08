@@ -23,7 +23,7 @@ const WS_URL =
 
 // PASTE YOUR NEW GROQ API KEY BETWEEN THE QUOTES
 const GROQ_API_KEY =
-  "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";
+  process.env.GROQ_API_KEY;
 
 const groq = new Groq({
   apiKey: GROQ_API_KEY
