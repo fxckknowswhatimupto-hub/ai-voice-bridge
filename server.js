@@ -1,7 +1,6 @@
 const http = require("http");
 const WebSocket = require("ws");
 const Groq = require("groq-sdk");
-const textToSpeech = require("@google-cloud/text-to-speech");
 const { spawn } = require("child_process");
 const ffmpegPath = require("ffmpeg-static");
 
@@ -21,14 +20,8 @@ const WS_URL =
 // ENVIRONMENT VARIABLES
 // ==================================================
 
-const GROQ_API_KEY =
-  process.env.GROQ_API_KEY;
-
-const N8N_WEBHOOK_URL =
-  process.env.N8N_WEBHOOK_URL;
-
-const GOOGLE_SERVICE_ACCOUNT_JSON =
-  process.env.GOOGLE_SERVICE_ACCOUNT_JSON;
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const N8N_WEBHOOK_URL = process.env.N8N_WEBHOOK_URL;
 
 if (!GROQ_API_KEY) {
   throw new Error("GROQ_API_KEY is missing");
@@ -38,12 +31,6 @@ if (!N8N_WEBHOOK_URL) {
   throw new Error("N8N_WEBHOOK_URL is missing");
 }
 
-if (!GOOGLE_SERVICE_ACCOUNT_JSON) {
-  throw new Error(
-    "GOOGLE_SERVICE_ACCOUNT_JSON is missing"
-  );
-}
-
 // ==================================================
 // GROQ
 // ==================================================
@@ -51,20 +38,6 @@ if (!GOOGLE_SERVICE_ACCOUNT_JSON) {
 const groq = new Groq({
   apiKey: GROQ_API_KEY
 });
-
-// ==================================================
-// GOOGLE TTS
-// ==================================================
-
-const googleCredentials =
-  JSON.parse(
-    GOOGLE_SERVICE_ACCOUNT_JSON
-  );
-
-const googleTTS =
-  new textToSpeech.TextToSpeechClient({
-    credentials: googleCredentials
-  });
 
 // ==================================================
 // HTTP SERVER
@@ -82,8 +55,7 @@ const server = http.createServer(
     if (req.url === "/health") {
 
       res.writeHead(200, {
-        "Content-Type":
-          "application/json"
+        "Content-Type": "application/json"
       });
 
       res.end(
@@ -96,8 +68,7 @@ const server = http.createServer(
     }
 
     res.writeHead(200, {
-      "Content-Type":
-        "application/json"
+      "Content-Type": "application/json"
     });
 
     res.end(
@@ -109,21 +80,18 @@ const server = http.createServer(
 );
 
 // ==================================================
-// WEBSOCKET
+// WEBSOCKET SERVER
 // ==================================================
 
-const wss =
-  new WebSocket.Server({
-    server
-  });
+const wss = new WebSocket.Server({
+  server
+});
 
 // ==================================================
 // PCM -> WAV
 // ==================================================
 
-function pcmToWav(
-  pcmBuffer
-) {
+function pcmToWav(pcmBuffer) {
 
   const sampleRate = 8000;
   const channels = 1;
@@ -145,25 +113,16 @@ function pcmToWav(
       44 + pcmBuffer.length
     );
 
-  wav.write(
-    "RIFF",
-    0
-  );
+  wav.write("RIFF", 0);
 
   wav.writeUInt32LE(
     36 + pcmBuffer.length,
     4
   );
 
-  wav.write(
-    "WAVE",
-    8
-  );
+  wav.write("WAVE", 8);
 
-  wav.write(
-    "fmt ",
-    12
-  );
+  wav.write("fmt ", 12);
 
   wav.writeUInt32LE(
     16,
@@ -200,10 +159,7 @@ function pcmToWav(
     34
   );
 
-  wav.write(
-    "data",
-    36
-  );
+  wav.write("data", 36);
 
   wav.writeUInt32LE(
     pcmBuffer.length,
@@ -228,10 +184,6 @@ function convertWavToExotelPCM(
 
   return new Promise(
     (resolve, reject) => {
-
-      console.log(
-        "Converting audio..."
-      );
 
       const ffmpeg =
         spawn(
@@ -287,6 +239,7 @@ function convertWavToExotelPCM(
 
             reject(
               new Error(
+                "FFmpeg failed: " +
                 Buffer
                   .concat(errors)
                   .toString()
@@ -322,8 +275,9 @@ function sendAudioToExotel(
 ) {
 
   if (
+    !ws ||
     ws.readyState !==
-    WebSocket.OPEN
+      WebSocket.OPEN
   ) {
 
     console.log(
@@ -430,22 +384,21 @@ async function transcribeAudio(
       pcmBuffer
     );
 
-  const file =
+  const audioFile =
     new File(
       [
         wavBuffer
       ],
       "caller.wav",
       {
-        type:
-          "audio/wav"
+        type: "audio/wav"
       }
     );
 
   const transcription =
     await groq.audio.transcriptions.create(
       {
-        file,
+        file: audioFile,
 
         model:
           "whisper-large-v3-turbo",
@@ -461,8 +414,7 @@ async function transcribeAudio(
   const text =
     String(
       transcription
-    )
-      .trim();
+    ).trim();
 
   console.log(
     "TRANSCRIPTION:",
@@ -473,7 +425,7 @@ async function transcribeAudio(
 }
 
 // ==================================================
-// N8N
+// SEND QUESTION TO N8N
 // ==================================================
 
 async function askN8N(
@@ -527,9 +479,7 @@ async function askN8N(
   try {
 
     data =
-      JSON.parse(
-        raw
-      );
+      JSON.parse(raw);
 
   } catch {
 
@@ -552,120 +502,11 @@ async function askN8N(
     );
   }
 
-  return String(
-    answer
-  );
+  return String(answer);
 }
 
 // ==================================================
-// GOOGLE TTS
-// ==================================================
-
-async function speakAnswer(
-  ws,
-  streamSid,
-  answer
-) {
-
-  console.log(
-    "Sending AI answer to Google TTS..."
-  );
-
-  const text =
-    String(answer)
-      .replace(
-        /\s+/g,
-        " "
-      )
-      .trim()
-      .slice(
-        0,
-        500
-      );
-
-  const request = {
-
-    input: {
-      text
-    },
-
-    voice: {
-
-      languageCode:
-        "en-IN",
-
-      name:
-        "en-IN-Standard-A"
-    },
-
-    audioConfig: {
-
-      audioEncoding:
-        "LINEAR16",
-
-      sampleRateHertz:
-        8000,
-
-      speakingRate:
-        1.05,
-
-      volumeGainDb:
-        0
-    }
-  };
-
-  const [
-    response
-  ] =
-    await googleTTS
-      .synthesizeSpeech(
-        request
-      );
-
-  if (
-    !response.audioContent
-  ) {
-
-    throw new Error(
-      "Google TTS returned no audio"
-    );
-  }
-
-  const wavBuffer =
-    Buffer.from(
-      response.audioContent
-    );
-
-  console.log(
-    "Google TTS audio received:",
-    wavBuffer.length,
-    "bytes"
-  );
-
-  const pcmBuffer =
-    await convertWavToExotelPCM(
-      wavBuffer
-    );
-
-  console.log(
-    "Converted PCM:",
-    pcmBuffer.length,
-    "bytes"
-  );
-
-  sendAudioToExotel(
-    ws,
-    streamSid,
-    pcmBuffer
-  );
-
-  console.log(
-    "ANSWER SENT TO CALLER"
-  );
-}
-
-// ==================================================
-// PROCESS CALLER SPEECH
+// PROCESS SPEECH
 // ==================================================
 
 async function processSpeech(
@@ -695,8 +536,7 @@ async function processSpeech(
 
     // Ignore extremely short audio
     if (
-      pcmBuffer.length <
-      8000
+      pcmBuffer.length < 8000
     ) {
 
       console.log(
@@ -705,6 +545,10 @@ async function processSpeech(
 
       return;
     }
+
+    // ----------------------------------------------
+    // SPEECH -> TEXT
+    // ----------------------------------------------
 
     const question =
       await transcribeAudio(
@@ -725,6 +569,10 @@ async function processSpeech(
       question
     );
 
+    // ----------------------------------------------
+    // TEXT -> N8N
+    // ----------------------------------------------
+
     const answer =
       await askN8N(
         question
@@ -735,11 +583,35 @@ async function processSpeech(
       answer
     );
 
-    await speakAnswer(
-      ws,
-      streamSid,
+    console.log(
+      "================================"
+    );
+
+    console.log(
+      "AI RESPONSE READY:"
+    );
+
+    console.log(
       answer
     );
+
+    console.log(
+      "================================"
+    );
+
+    /*
+     * TTS intentionally disabled.
+     *
+     * We are NOT using:
+     *
+     * canopylabs/orpheus-v1-english
+     *
+     * because you already hit its
+     * token-per-day limit.
+     *
+     * Once the new TTS method is chosen,
+     * call speakAnswer() here.
+     */
 
   } catch (error) {
 
@@ -754,7 +626,7 @@ async function processSpeech(
 }
 
 // ==================================================
-// EXOTEL CONNECTION
+// EXOTEL WEBSOCKET CONNECTION
 // ==================================================
 
 wss.on(
@@ -762,12 +634,15 @@ wss.on(
   (ws) => {
 
     console.log("");
+
     console.log(
       "================================"
     );
+
     console.log(
       "EXOTEL WEBSOCKET CONNECTED"
     );
+
     console.log(
       "================================"
     );
@@ -885,23 +760,16 @@ wss.on(
               );
 
               // ----------------------------------
-              // Calculate simple audio level
+              // Calculate audio level
               // ----------------------------------
 
               let sum = 0;
 
               for (
                 let i = 0;
-                i < audio.length;
+                i + 1 < audio.length;
                 i += 2
               ) {
-
-                if (
-                  i + 1 >=
-                  audio.length
-                ) {
-                  break;
-                }
 
                 const sample =
                   audio.readInt16LE(
@@ -926,7 +794,7 @@ wss.on(
               );
 
               // ----------------------------------
-              // Speech detected
+              // Speech detection
               // ----------------------------------
 
               if (
@@ -936,10 +804,6 @@ wss.on(
                 lastSpeechTime =
                   Date.now();
               }
-
-              // ----------------------------------
-              // Reset end-of-speech timer
-              // ----------------------------------
 
               clearTimeout(
                 speechTimer
@@ -1102,7 +966,7 @@ wss.on(
 );
 
 // ==================================================
-// START
+// START SERVER
 // ==================================================
 
 server.listen(
@@ -1111,12 +975,15 @@ server.listen(
   () => {
 
     console.log("");
+
     console.log(
       "--------------------------------"
     );
+
     console.log(
       "AI VOICE BRIDGE"
     );
+
     console.log(
       "--------------------------------"
     );
