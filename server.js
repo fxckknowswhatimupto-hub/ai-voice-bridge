@@ -8,7 +8,7 @@ const ffmpegPath = require("ffmpeg-static");
 // CONFIG
 // ==================================================
 
-const PORT = 3000;
+const PORT = process.env.PORT || 3000;
 
 // CURRENT CLOUDFLARE URL FOR EXOTEL WEBSOCKET
 const PUBLIC_URL =
