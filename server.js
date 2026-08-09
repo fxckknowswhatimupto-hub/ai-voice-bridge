@@ -18,15 +18,9 @@ const WS_URL =
 // ENVIRONMENT VARIABLES
 // ==================================================
 
-const GROQ_API_KEY =
-  process.env.GROQ_API_KEY;
-
-const DEEPGRAM_API_KEY =
-  process.env.DEEPGRAM_API_KEY;
-
-// ==================================================
-// ENVIRONMENT CHECK
-// ==================================================
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
+const TAVILY_API_KEY = process.env.TAVILY_API_KEY;
 
 if (!GROQ_API_KEY) {
   throw new Error("GROQ_API_KEY is missing");
@@ -36,8 +30,12 @@ if (!DEEPGRAM_API_KEY) {
   throw new Error("DEEPGRAM_API_KEY is missing");
 }
 
+if (!TAVILY_API_KEY) {
+  throw new Error("TAVILY_API_KEY is missing");
+}
+
 // ==================================================
-// CLIENTS
+// CLIENT
 // ==================================================
 
 const groq = new Groq({
@@ -48,39 +46,10 @@ const groq = new Groq({
 // HTTP SERVER
 // ==================================================
 
-const server = http.createServer(
-  async (req, res) => {
+const server = http.createServer(async (req, res) => {
+  console.log("HTTP request:", req.method, req.url);
 
-    console.log(
-      "HTTP request:",
-      req.method,
-      req.url
-    );
-
-    // ----------------------------------------------
-    // HEALTH
-    // ----------------------------------------------
-
-    if (req.url === "/health") {
-
-      res.writeHead(200, {
-        "Content-Type": "application/json"
-      });
-
-      res.end(
-        JSON.stringify({
-          status: "ok",
-          service: "ai-voice-bridge"
-        })
-      );
-
-      return;
-    }
-
-    // ----------------------------------------------
-    // DEFAULT
-    // ----------------------------------------------
-
+  if (req.url === "/health") {
     res.writeHead(200, {
       "Content-Type": "application/json"
     });
@@ -88,51 +57,51 @@ const server = http.createServer(
     res.end(
       JSON.stringify({
         status: "ok",
-        websocket: WS_URL
+        service: "ai-voice-bridge"
       })
     );
+
+    return;
   }
-);
 
-// ==================================================
-// WEBSOCKET SERVER
-// ==================================================
-
-const wss =
-  new WebSocket.Server({
-    server
+  res.writeHead(200, {
+    "Content-Type": "application/json"
   });
+
+  res.end(
+    JSON.stringify({
+      status: "ok",
+      websocket: WS_URL
+    })
+  );
+});
+
+// ==================================================
+// WEBSOCKET
+// ==================================================
+
+const wss = new WebSocket.Server({
+  server
+});
 
 // ==================================================
 // AUDIO LEVEL
 // ==================================================
 
 function getAudioLevel(buffer) {
-
-  if (
-    !buffer ||
-    buffer.length < 2
-  ) {
+  if (!buffer || buffer.length < 2) {
     return 0;
   }
 
   let total = 0;
 
-  const samples =
-    Math.floor(
-      buffer.length / 2
-    );
+  const samples = Math.floor(
+    buffer.length / 2
+  );
 
-  for (
-    let i = 0;
-    i < samples;
-    i++
-  ) {
-
+  for (let i = 0; i < samples; i++) {
     total += Math.abs(
-      buffer.readInt16LE(
-        i * 2
-      )
+      buffer.readInt16LE(i * 2)
     );
   }
 
@@ -143,20 +112,11 @@ function getAudioLevel(buffer) {
 // DEEPGRAM STT
 // ==================================================
 
-async function transcribeAudio(
-  pcmBuffer
-) {
-
+async function transcribeAudio(pcmBuffer) {
   console.log("");
-  console.log(
-    "================================"
-  );
-  console.log(
-    "DEEPGRAM SPEECH TO TEXT"
-  );
-  console.log(
-    "================================"
-  );
+  console.log("================================");
+  console.log("DEEPGRAM STT");
+  console.log("================================");
 
   const url =
     "https://api.deepgram.com/v1/listen" +
@@ -166,35 +126,29 @@ async function transcribeAudio(
     "&sample_rate=8000" +
     "&channels=1";
 
-  const response =
-    await fetch(
-      url,
-      {
-        method: "POST",
+  const response = await fetch(
+    url,
+    {
+      method: "POST",
 
-        headers: {
-          "Authorization":
-            "Token " +
-            DEEPGRAM_API_KEY,
+      headers: {
+        Authorization:
+          `Token ${DEEPGRAM_API_KEY}`,
 
-          "Content-Type":
-            "audio/raw"
-        },
+        "Content-Type":
+          "audio/raw"
+      },
 
-        body: pcmBuffer
-      }
-    );
+      body: pcmBuffer
+    }
+  );
 
   if (!response.ok) {
-
     const errorText =
       await response.text();
 
     throw new Error(
-      "Deepgram STT " +
-      response.status +
-      ": " +
-      errorText
+      `Deepgram STT ${response.status}: ${errorText}`
     );
   }
 
@@ -207,7 +161,7 @@ async function transcribeAudio(
       ?.transcript || "";
 
   const text =
-    String(transcript)
+    transcript
       .replace(/\s+/g, " ")
       .trim();
 
@@ -220,23 +174,187 @@ async function transcribeAudio(
 }
 
 // ==================================================
-// GROQ LLM
+// DETECT LIVE INFORMATION QUESTIONS
 // ==================================================
 
-async function askGroq(
-  question
-) {
+function needsWebSearch(question) {
+  const text =
+    question
+      .toLowerCase()
+      .trim();
 
+  const livePatterns = [
+
+    // Current / latest
+    /\b(current|currently|right now|now|today|tonight|latest|recent|recently)\b/,
+
+    // News
+    /\b(news|headlines|breaking news|updates)\b/,
+
+    // Time-sensitive verbs
+    /\b(happening|happened|won|lost|released|launched|announced)\b/,
+
+    // Weather
+    /\b(weather|temperature|forecast|rain|raining|humidity)\b/,
+
+    // Prices / markets
+    /\b(price|prices|cost|worth|stock|stocks|share price|bitcoin|crypto|exchange rate|usd|inr)\b/,
+
+    // Sports
+    /\b(score|scores|match|matches|game|games|fixture|fixtures|standings|points table)\b/,
+
+    // People / positions
+    /\b(who is the current|who's the current|current president|current prime minister|current ceo)\b/,
+
+    // Events
+    /\b(schedule|scheduled|opening hours|open now|closed now)\b/,
+
+    // Explicit web request
+    /\b(search the web|search online|look online|look it up|google it)\b/
+  ];
+
+  return livePatterns.some(
+    pattern => pattern.test(text)
+  );
+}
+
+// ==================================================
+// TAVILY WEB SEARCH
+// ==================================================
+
+async function searchWeb(question) {
   console.log("");
+  console.log("================================");
+  console.log("TAVILY LIVE WEB SEARCH");
+  console.log("================================");
+
+  const response =
+    await fetch(
+      "https://api.tavily.com/search",
+      {
+        method: "POST",
+
+        headers: {
+          "Content-Type":
+            "application/json"
+        },
+
+        body: JSON.stringify({
+          api_key:
+            TAVILY_API_KEY,
+
+          query:
+            question,
+
+          search_depth:
+            "basic",
+
+          topic:
+            "general",
+
+          max_results:
+            5,
+
+          include_answer:
+            true,
+
+          include_raw_content:
+            false
+        })
+      }
+    );
+
+  if (!response.ok) {
+    const errorText =
+      await response.text();
+
+    throw new Error(
+      `Tavily ${response.status}: ${errorText}`
+    );
+  }
+
+  const data =
+    await response.json();
+
   console.log(
-    "================================"
+    "Tavily results:",
+    data?.results?.length || 0
   );
+
+  // ----------------------------------------------
+  // Tavily's generated answer
+  // ----------------------------------------------
+
+  let answer =
+    data?.answer || "";
+
+  // ----------------------------------------------
+  // Search result snippets
+  // ----------------------------------------------
+
+  const results =
+    Array.isArray(data?.results)
+      ? data.results
+      : [];
+
+  const sources =
+    results
+      .slice(0, 5)
+      .map((result, index) => {
+
+        const title =
+          result?.title || "";
+
+        const content =
+          result?.content || "";
+
+        const url =
+          result?.url || "";
+
+        return (
+          `[Source ${index + 1}] ` +
+          `${title}\n` +
+          `${content}\n` +
+          `${url}`
+        );
+      })
+      .join("\n\n");
+
+  if (!answer && !sources) {
+    throw new Error(
+      "Tavily returned no useful search results"
+    );
+  }
+
+  const webContext =
+    [
+      answer
+        ? `Tavily summary:\n${answer}`
+        : "",
+
+      sources
+        ? `Search results:\n${sources}`
+        : ""
+    ]
+      .filter(Boolean)
+      .join("\n\n");
+
   console.log(
-    "GROQ GPT-OSS 20B"
+    "Web context prepared."
   );
-  console.log(
-    "================================"
-  );
+
+  return webContext;
+}
+
+// ==================================================
+// GROQ NORMAL QUESTION
+// ==================================================
+
+async function askGroq(question) {
+  console.log("");
+  console.log("================================");
+  console.log("GROQ GPT-OSS 20B");
+  console.log("================================");
 
   const completion =
     await groq.chat.completions.create({
@@ -245,16 +363,15 @@ async function askGroq(
         "openai/gpt-oss-20b",
 
       messages: [
-
         {
           role: "system",
 
           content:
-            "You are a fast, helpful phone voice assistant. " +
-            "Speak naturally and conversationally. " +
-            "Keep answers short and direct because the answer will be spoken over a phone call. " +
-            "Do not use markdown, bullet points, emojis, or long explanations. " +
-            "When you do not have live information available, say so instead of pretending that you do."
+            "You are a fast, natural phone voice assistant. " +
+            "Answer conversationally and concisely. " +
+            "Your response will be spoken aloud over a phone call. " +
+            "Do not use markdown, bullet points, emojis, URLs, or citations. " +
+            "Usually answer in one or two short sentences."
         },
 
         {
@@ -263,64 +380,258 @@ async function askGroq(
           content:
             question
         }
-
       ],
 
-      temperature: 0.3,
+      temperature:
+        0.2,
 
-      max_tokens: 180
+      max_tokens:
+        150
     });
 
-  const answer =
-    completion
-      ?.choices?.[0]
-      ?.message?.content || "";
+  const choice =
+    completion?.choices?.[0];
+
+  let answer =
+    choice?.message?.content;
+
+  // Some models/providers may return
+  // content in an unexpected structure.
+
+  if (
+    typeof answer !== "string"
+  ) {
+
+    if (
+      Array.isArray(answer)
+    ) {
+
+      answer =
+        answer
+          .map(part => {
+
+            if (
+              typeof part === "string"
+            ) {
+              return part;
+            }
+
+            return (
+              part?.text || ""
+            );
+          })
+          .join(" ");
+    }
+  }
 
   const text =
-    String(answer)
+    String(answer || "")
       .replace(/\s+/g, " ")
       .trim();
 
+  console.log(
+    "Groq finish reason:",
+    choice?.finish_reason
+  );
+
+  console.log(
+    "Groq answer:",
+    text
+  );
+
   if (!text) {
+
+    console.log(
+      "Groq returned empty content."
+    );
 
     throw new Error(
       "Groq returned an empty answer"
     );
   }
 
+  return text;
+}
+
+// ==================================================
+// GROQ WITH WEB CONTEXT
+// ==================================================
+
+async function askGroqWithWeb(
+  question,
+  webContext
+) {
+  console.log("");
+  console.log("================================");
+  console.log("GROQ + TAVILY");
+  console.log("================================");
+
+  const completion =
+    await groq.chat.completions.create({
+
+      model:
+        "openai/gpt-oss-20b",
+
+      messages: [
+        {
+          role:
+            "system",
+
+          content:
+            "You are a fast phone voice assistant. " +
+            "Answer the caller using the supplied live web information. " +
+            "The web information may contain multiple sources. " +
+            "Use the most relevant and recent information. " +
+            "Do not invent facts that are not supported by the web information. " +
+            "If the information is uncertain or conflicting, say so briefly. " +
+            "Your answer will be spoken aloud. " +
+            "Do not use markdown, bullet points, emojis, URLs, citations, or source names unless necessary. " +
+            "Keep the answer concise, usually one to three sentences."
+        },
+
+        {
+          role:
+            "user",
+
+          content:
+            `Caller question:\n${question}\n\n` +
+            `LIVE WEB INFORMATION:\n${webContext}`
+        }
+      ],
+
+      temperature:
+        0.2,
+
+      max_tokens:
+        180
+    });
+
+  const choice =
+    completion?.choices?.[0];
+
+  let answer =
+    choice?.message?.content;
+
+  if (
+    typeof answer !== "string"
+  ) {
+
+    if (
+      Array.isArray(answer)
+    ) {
+
+      answer =
+        answer
+          .map(part => {
+
+            if (
+              typeof part === "string"
+            ) {
+              return part;
+            }
+
+            return (
+              part?.text || ""
+            );
+          })
+          .join(" ");
+    }
+  }
+
+  const text =
+    String(answer || "")
+      .replace(/\s+/g, " ")
+      .trim();
+
   console.log(
-    "AI ANSWER:",
+    "Groq web answer:",
     text
   );
 
+  if (!text) {
+    throw new Error(
+      "Groq returned an empty web-search answer"
+    );
+  }
+
   return text;
+}
+
+// ==================================================
+// SMART LLM
+// ==================================================
+
+async function getAIAnswer(question) {
+
+  const shouldSearch =
+    needsWebSearch(question);
+
+  console.log("");
+  console.log(
+    "WEB SEARCH NEEDED:",
+    shouldSearch
+  );
+
+  if (!shouldSearch) {
+
+    return await askGroq(
+      question
+    );
+  }
+
+  // ----------------------------------------------
+  // LIVE WEB SEARCH
+  // ----------------------------------------------
+
+  try {
+
+    const webContext =
+      await searchWeb(
+        question
+      );
+
+    return await askGroqWithWeb(
+      question,
+      webContext
+    );
+
+  } catch (error) {
+
+    console.error(
+      "Live search failed:",
+      error.message
+    );
+
+    // If web search fails,
+    // still answer using Groq.
+
+    console.log(
+      "Falling back to Groq without web."
+    );
+
+    return await askGroq(
+      question
+    );
+  }
 }
 
 // ==================================================
 // DEEPGRAM TTS
 // ==================================================
 
-async function synthesizeSpeech(
-  text
-) {
+async function synthesizeSpeech(text) {
 
   console.log("");
-  console.log(
-    "================================"
-  );
-  console.log(
-    "DEEPGRAM TEXT TO SPEECH"
-  );
-  console.log(
-    "================================"
-  );
+  console.log("================================");
+  console.log("DEEPGRAM TTS");
+  console.log("================================");
 
   let cleanText =
     String(text)
       .replace(/\s+/g, " ")
       .trim();
 
-  // Keep phone responses short.
+  // Keep phone answers short.
 
   cleanText =
     cleanText.slice(0, 1000);
@@ -338,9 +649,8 @@ async function synthesizeSpeech(
         method: "POST",
 
         headers: {
-          "Authorization":
-            "Token " +
-            DEEPGRAM_API_KEY,
+          Authorization:
+            `Token ${DEEPGRAM_API_KEY}`,
 
           "Content-Type":
             "application/json"
@@ -348,7 +658,8 @@ async function synthesizeSpeech(
 
         body:
           JSON.stringify({
-            text: cleanText
+            text:
+              cleanText
           })
       }
     );
@@ -359,10 +670,7 @@ async function synthesizeSpeech(
       await response.text();
 
     throw new Error(
-      "Deepgram TTS " +
-      response.status +
-      ": " +
-      errorText
+      `Deepgram TTS ${response.status}: ${errorText}`
     );
   }
 
@@ -384,7 +692,7 @@ async function synthesizeSpeech(
 }
 
 // ==================================================
-// SEND PCM AUDIO TO EXOTEL
+// SEND AUDIO TO EXOTEL
 // ==================================================
 
 function sendAudioToExotel(
@@ -395,8 +703,7 @@ function sendAudioToExotel(
 
   if (
     !ws ||
-    ws.readyState !==
-      WebSocket.OPEN
+    ws.readyState !== WebSocket.OPEN
   ) {
 
     console.log(
@@ -406,26 +713,10 @@ function sendAudioToExotel(
     return;
   }
 
-  /*
-   * Exotel audio:
-   *
-   * 8000 Hz
-   * 16-bit
-   * mono
-   *
-   * 20 ms =
-   * 160 samples
-   *
-   * 160 * 2 =
-   * 320 bytes
-   */
-
   const CHUNK_SIZE = 320;
 
   let sequenceNumber = 1;
-
   let chunkNumber = 0;
-
   let timestamp = 0;
 
   for (
@@ -443,64 +734,46 @@ function sendAudioToExotel(
         )
       );
 
-    const message = {
-
-      event:
-        "media",
-
-      sequence_number:
-        String(
-          sequenceNumber
-        ),
-
-      stream_sid:
-        streamSid,
-
-      media: {
-
-        chunk:
-          String(
-            chunkNumber
-          ),
-
-        timestamp:
-          String(
-            timestamp
-          ),
-
-        payload:
-          chunk.toString(
-            "base64"
-          )
-      }
-    };
-
     ws.send(
-      JSON.stringify(
-        message
-      )
+      JSON.stringify({
+        event:
+          "media",
+
+        sequence_number:
+          String(sequenceNumber),
+
+        stream_sid:
+          streamSid,
+
+        media: {
+
+          chunk:
+            String(chunkNumber),
+
+          timestamp:
+            String(timestamp),
+
+          payload:
+            chunk.toString(
+              "base64"
+            )
+        }
+      })
     );
 
     sequenceNumber++;
-
     chunkNumber++;
-
     timestamp += 20;
   }
 
   console.log(
     "Sent",
     chunkNumber,
-    "audio chunks to Exotel."
+    "audio chunks."
   );
-
-  // ----------------------------------------------
-  // MARK
-  // ----------------------------------------------
 
   ws.send(
     JSON.stringify({
-
       event:
         "mark",
 
@@ -508,7 +781,6 @@ function sendAudioToExotel(
         streamSid,
 
       mark: {
-
         name:
           "ai_response_complete"
       }
@@ -529,19 +801,9 @@ async function processQuestion(
   try {
 
     console.log("");
-    console.log(
-      "################################"
-    );
-    console.log(
-      "PROCESSING CALLER QUESTION"
-    );
-    console.log(
-      "################################"
-    );
-
-    // ----------------------------------------------
-    // AUDIO CHECK
-    // ----------------------------------------------
+    console.log("################################");
+    console.log("PROCESSING QUESTION");
+    console.log("################################");
 
     if (
       !audioBuffer ||
@@ -579,13 +841,18 @@ async function processQuestion(
     );
 
     // ----------------------------------------------
-    // LLM
+    // SMART AI
     // ----------------------------------------------
 
     const answer =
-      await askGroq(
+      await getAIAnswer(
         question
       );
+
+    console.log(
+      "FINAL ANSWER:",
+      answer
+    );
 
     // ----------------------------------------------
     // TTS
@@ -613,15 +880,9 @@ async function processQuestion(
   } catch (error) {
 
     console.log("");
-    console.log(
-      "################################"
-    );
-    console.log(
-      "VOICE PROCESSING ERROR"
-    );
-    console.log(
-      "################################"
-    );
+    console.log("################################");
+    console.log("VOICE PROCESSING ERROR");
+    console.log("################################");
 
     console.error(
       error
@@ -630,7 +891,7 @@ async function processQuestion(
 }
 
 // ==================================================
-// EXOTEL WEBSOCKET CONNECTION
+// EXOTEL CONNECTION
 // ==================================================
 
 wss.on(
@@ -638,15 +899,9 @@ wss.on(
   (ws) => {
 
     console.log("");
-    console.log(
-      "================================"
-    );
-    console.log(
-      "EXOTEL WEBSOCKET CONNECTED"
-    );
-    console.log(
-      "================================"
-    );
+    console.log("================================");
+    console.log("EXOTEL WEBSOCKET CONNECTED");
+    console.log("================================");
 
     let streamSid =
       null;
@@ -654,7 +909,8 @@ wss.on(
     let callSid =
       null;
 
-    let audioChunks = [];
+    let audioChunks =
+      [];
 
     let speechStarted =
       false;
@@ -665,34 +921,20 @@ wss.on(
     let processing =
       false;
 
-    /*
-     * Exotel sends approximately
-     * 20 ms audio frames.
-     */
+    // 20 ms frames
 
     const SILENCE_FRAME_LIMIT =
-      30;
+      28;
 
-    /*
-     * Speech threshold.
-     *
-     * If calls don't detect speech,
-     * lower this.
-     *
-     * If background noise triggers
-     * speech, raise this.
-     */
+    // Slightly more responsive
 
     const SPEECH_THRESHOLD =
       350;
 
-    // ==================================================
-    // RESET SPEECH
-    // ==================================================
-
     function resetSpeech() {
 
-      audioChunks = [];
+      audioChunks =
+        [];
 
       speechStarted =
         false;
@@ -701,13 +943,11 @@ wss.on(
         0;
     }
 
-    // ==================================================
-    // FINISH SPEECH
-    // ==================================================
-
     async function finishSpeech() {
 
-      if (processing) {
+      if (
+        processing
+      ) {
         return;
       }
 
@@ -729,20 +969,14 @@ wss.on(
         );
 
       console.log("");
-      console.log(
-        "================================"
-      );
-      console.log(
-        "END OF SPEECH"
-      );
+      console.log("================================");
+      console.log("END OF SPEECH");
       console.log(
         "Audio:",
         fullAudio.length,
         "bytes"
       );
-      console.log(
-        "================================"
-      );
+      console.log("================================");
 
       resetSpeech();
 
@@ -761,10 +995,6 @@ wss.on(
       }
     }
 
-    // ==================================================
-    // WEBSOCKET MESSAGE
-    // ==================================================
-
     ws.on(
       "message",
       async (data) => {
@@ -779,10 +1009,18 @@ wss.on(
           const event =
             message.event;
 
-          console.log(
-            "Event:",
-            event
-          );
+          // Don't spam Render logs
+          // for every audio frame.
+
+          if (
+            event !== "media"
+          ) {
+
+            console.log(
+              "Event:",
+              event
+            );
+          }
 
           // ========================================
           // CONNECTED
@@ -859,34 +1097,20 @@ wss.on(
                 "base64"
               );
 
+            // Don't process new speech while
+            // the previous response is being made.
+
+            if (
+              processing
+            ) {
+
+              return;
+            }
+
             const level =
               getAudioLevel(
                 audio
               );
-
-            /*
-             * Don't spam Render logs
-             * with every frame.
-             */
-
-            if (
-              Math.random() < 0.05
-            ) {
-
-              console.log(
-                "Audio level:",
-                Math.round(level)
-              );
-            }
-
-            // --------------------------------------
-            // CURRENTLY PROCESSING
-            // --------------------------------------
-
-            if (processing) {
-
-              return;
-            }
 
             // --------------------------------------
             // SPEECH START
@@ -932,6 +1156,10 @@ wss.on(
               );
 
               silenceFrames++;
+
+              // ------------------------------------
+              // SPEECH END
+              // ------------------------------------
 
               if (
                 silenceFrames >=
@@ -1021,10 +1249,6 @@ wss.on(
       }
     );
 
-    // ==================================================
-    // CLOSE
-    // ==================================================
-
     ws.on(
       "close",
       () => {
@@ -1034,10 +1258,6 @@ wss.on(
         );
       }
     );
-
-    // ==================================================
-    // ERROR
-    // ==================================================
 
     ws.on(
       "error",
@@ -1053,7 +1273,7 @@ wss.on(
 );
 
 // ==================================================
-// SERVER START
+// START SERVER
 // ==================================================
 
 server.listen(
@@ -1062,24 +1282,18 @@ server.listen(
   () => {
 
     console.log("");
-    console.log(
-      "--------------------------------"
-    );
-    console.log(
-      "AI VOICE BRIDGE"
-    );
-    console.log(
-      "--------------------------------"
-    );
+    console.log("--------------------------------");
+    console.log("AI VOICE BRIDGE");
+    console.log("--------------------------------");
 
     console.log(
       "HTTP:",
-      "http://localhost:" + PORT
+      `http://localhost:${PORT}`
     );
 
     console.log(
       "WebSocket:",
-      "ws://localhost:" + PORT
+      `ws://localhost:${PORT}`
     );
 
     console.log(
@@ -1088,16 +1302,20 @@ server.listen(
     );
 
     console.log("");
+
     console.log(
-      "Groq LLM: openai/gpt-oss-20b"
+      "Groq:",
+      "openai/gpt-oss-20b"
     );
 
     console.log(
-      "Deepgram: Nova-3 STT"
+      "Deepgram:",
+      "STT + TTS"
     );
 
     console.log(
-      "Deepgram: Aura-2 TTS"
+      "Tavily:",
+      "LIVE WEB SEARCH"
     );
 
     console.log("");
