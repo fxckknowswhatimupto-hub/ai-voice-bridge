@@ -1,17 +1,13 @@
 {
   "name": "ai-voice-bridge",
   "version": "1.0.0",
-  "description": "Exotel AI Voice Bridge using ElevenLabs and n8n",
+  "description": "Exotel voice AI bridge using Deepgram and Groq",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
-  "engines": {
-    "node": ">=20"
-  },
   "dependencies": {
-    "dotenv": "^17.4.2",
-    "ffmpeg-static": "^5.3.0",
-    "ws": "^8.21.3"
+    "groq-sdk": "^0.37.0",
+    "ws": "^8.18.0"
   }
 }
