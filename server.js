@@ -14,13 +14,21 @@ const PUBLIC_URL =
 const WS_URL =
   PUBLIC_URL.replace("https://", "wss://");
 
+const GROQ_MODEL =
+  "llama-3.1-8b-instant";
+
 // ==================================================
 // ENVIRONMENT VARIABLES
 // ==================================================
 
-const GROQ_API_KEY = process.env.GROQ_API_KEY;
-const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
-const TAVILY_API_KEY = process.env.TAVILY_API_KEY;
+const GROQ_API_KEY =
+  process.env.GROQ_API_KEY;
+
+const DEEPGRAM_API_KEY =
+  process.env.DEEPGRAM_API_KEY;
+
+const TAVILY_API_KEY =
+  process.env.TAVILY_API_KEY;
 
 if (!GROQ_API_KEY) {
   throw new Error("GROQ_API_KEY is missing");
@@ -31,11 +39,13 @@ if (!DEEPGRAM_API_KEY) {
 }
 
 if (!TAVILY_API_KEY) {
-  console.warn("WARNING: TAVILY_API_KEY is missing");
+  console.log(
+    "WARNING: TAVILY_API_KEY is missing. Live web search disabled."
+  );
 }
 
 // ==================================================
-// CLIENTS
+// GROQ
 // ==================================================
 
 const groq = new Groq({
@@ -46,61 +56,81 @@ const groq = new Groq({
 // HTTP SERVER
 // ==================================================
 
-const server = http.createServer(async (req, res) => {
-  console.log("HTTP:", req.method, req.url);
+const server = http.createServer(
+  (req, res) => {
 
-  if (req.url === "/health") {
+    if (req.url === "/health") {
+
+      res.writeHead(200, {
+        "Content-Type":
+          "application/json"
+      });
+
+      res.end(
+        JSON.stringify({
+          status: "ok",
+          service: "ai-voice-bridge",
+          model: GROQ_MODEL
+        })
+      );
+
+      return;
+    }
+
     res.writeHead(200, {
-      "Content-Type": "application/json"
+      "Content-Type":
+        "application/json"
     });
 
     res.end(
       JSON.stringify({
         status: "ok",
-        service: "ai-voice-bridge"
+        websocket: WS_URL,
+        model: GROQ_MODEL
       })
     );
-
-    return;
   }
-
-  res.writeHead(200, {
-    "Content-Type": "application/json"
-  });
-
-  res.end(
-    JSON.stringify({
-      status: "ok",
-      websocket: WS_URL
-    })
-  );
-});
+);
 
 // ==================================================
 // WEBSOCKET
 // ==================================================
 
-const wss = new WebSocket.Server({
-  server
-});
+const wss =
+  new WebSocket.Server({
+    server
+  });
 
 // ==================================================
 // AUDIO LEVEL
 // ==================================================
 
 function getAudioLevel(buffer) {
-  if (!buffer || buffer.length < 2) {
+
+  if (
+    !buffer ||
+    buffer.length < 2
+  ) {
     return 0;
   }
 
   let total = 0;
 
   const samples =
-    Math.floor(buffer.length / 2);
+    Math.floor(
+      buffer.length / 2
+    );
 
-  for (let i = 0; i < samples; i++) {
+  for (
+    let i = 0;
+    i < samples;
+    i++
+  ) {
+
     total += Math.abs(
-      buffer.readInt16LE(i * 2)
+      buffer.readInt16LE(
+        i * 2
+      )
     );
   }
 
@@ -111,40 +141,44 @@ function getAudioLevel(buffer) {
 // DEEPGRAM STT
 // ==================================================
 
-async function transcribeAudio(pcmBuffer) {
-  console.log("");
-  console.log("================================");
-  console.log("DEEPGRAM STT");
-  console.log("================================");
+async function transcribeAudio(
+  pcmBuffer
+) {
 
-  const url =
-    "https://api.deepgram.com/v1/listen" +
-    "?model=nova-3" +
-    "&language=en" +
-    "&encoding=linear16" +
-    "&sample_rate=8000" +
-    "&channels=1";
+  const response =
+    await fetch(
+      "https://api.deepgram.com/v1/listen" +
+      "?model=nova-3" +
+      "&language=en" +
+      "&encoding=linear16" +
+      "&sample_rate=8000" +
+      "&channels=1",
+      {
+        method: "POST",
 
-  const response = await fetch(url, {
-    method: "POST",
+        headers: {
+          Authorization:
+            "Token " +
+            DEEPGRAM_API_KEY,
 
-    headers: {
-      Authorization:
-        `Token ${DEEPGRAM_API_KEY}`,
+          "Content-Type":
+            "audio/raw"
+        },
 
-      "Content-Type":
-        "audio/raw"
-    },
-
-    body: pcmBuffer
-  });
+        body: pcmBuffer
+      }
+    );
 
   if (!response.ok) {
+
     const errorText =
       await response.text();
 
     throw new Error(
-      `Deepgram STT ${response.status}: ${errorText}`
+      "Deepgram STT " +
+      response.status +
+      ": " +
+      errorText
     );
   }
 
@@ -152,133 +186,225 @@ async function transcribeAudio(pcmBuffer) {
     await response.json();
 
   const transcript =
-    data?.results?.channels?.[0]
-      ?.alternatives?.[0]
-      ?.transcript || "";
+    data &&
+    data.results &&
+    data.results.channels &&
+    data.results.channels[0] &&
+    data.results.channels[0].alternatives &&
+    data.results.channels[0]
+      .alternatives[0]
+      ? data.results.channels[0]
+          .alternatives[0]
+          .transcript
+      : "";
 
-  const text =
-    String(transcript)
-      .replace(/\s+/g, " ")
-      .trim();
-
-  console.log(
-    "TRANSCRIPTION:",
-    text
-  );
-
-  return text;
+  return String(
+    transcript || ""
+  )
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 // ==================================================
-// DETERMINE IF WEB SEARCH IS NEEDED
+// DETERMINE WHETHER WEB SEARCH IS NEEDED
 // ==================================================
 
-function needsWebSearch(question) {
+function needsWebSearch(
+  question
+) {
+
   const q =
     String(question)
       .toLowerCase()
       .trim();
 
-  const liveWords = [
+  // ----------------------------------------------
+  // LIVE INFORMATION
+  // ----------------------------------------------
+
+  const liveKeywords = [
+
     "today",
     "tonight",
     "tomorrow",
     "yesterday",
+
     "now",
     "currently",
     "current",
+
     "latest",
     "recent",
     "recently",
-    "live",
+
     "news",
+
     "weather",
     "temperature",
-    "forecast",
-    "score",
-    "scores",
-    "match",
-    "game",
-    "won",
-    "winner",
+
+    "open now",
+    "closed now",
+
+    "opening hours",
+    "opening time",
+
+    "timing",
+    "timings",
+
     "price",
     "prices",
-    "stock",
-    "traffic",
-    "open",
-    "opening",
-    "closed",
-    "available",
-    "availability"
+    "cost",
+
+    "stock price",
+
+    "score",
+    "match today",
+    "game today",
+
+    "schedule"
   ];
 
-  const localWords = [
+  for (
+    const keyword of liveKeywords
+  ) {
+
+    if (
+      q.includes(keyword)
+    ) {
+      return true;
+    }
+  }
+
+  // ----------------------------------------------
+  // LOCAL INFORMATION
+  // ----------------------------------------------
+
+  const localKeywords = [
+
+    "best restaurant",
+    "best restaurants",
+
+    "best cafe",
+    "best cafes",
+
+    "best hotel",
+    "best hotels",
+
+    "best place",
+    "best places",
+
     "restaurant",
     "restaurants",
-    "hotel",
-    "hotels",
-    "mall",
-    "malls",
-    "shop",
-    "shops",
-    "store",
-    "stores",
+
     "cafe",
     "cafes",
-    "coffee",
-    "hospital",
-    "hospitals",
+
+    "hotel",
+    "hotels",
+
+    "mall",
     "cinema",
-    "cinemas",
-    "theatre",
-    "theater",
+
+    "hospital",
+
+    "airport",
+
+    "shop",
+    "shops",
+
+    "store",
+    "stores",
+
+    "where is",
+    "where are",
+
+    "located",
+    "location",
+
     "near me",
     "nearby",
-    "in coimbatore",
-    "in chennai",
-    "in bangalore",
-    "in bengaluru",
-    "in mumbai",
-    "in delhi",
-    "in hyderabad"
-  ];
 
-  const currentPhrases = [
-    "what is the best",
-    "which is the best",
-    "where is",
-    "where can i find",
-    "what are the best",
+    "how far",
+
+    "distance",
+
+    "directions",
+
     "recommend",
-    "recommendations",
-    "look up",
-    "search for",
-    "find me",
-    "tell me about"
+    "recommendation"
   ];
 
-  if (
-    liveWords.some(word =>
-      q.includes(word)
-    )
+  for (
+    const keyword of localKeywords
   ) {
-    return true;
+
+    if (
+      q.includes(keyword)
+    ) {
+      return true;
+    }
   }
 
-  if (
-    localWords.some(word =>
-      q.includes(word)
-    )
-  ) {
-    return true;
-  }
+  // ----------------------------------------------
+  // LOCATIONS
+  // ----------------------------------------------
 
-  if (
-    currentPhrases.some(phrase =>
-      q.includes(phrase)
-    )
+  const locations = [
+
+    "coimbatore",
+    "chennai",
+    "bangalore",
+    "bengaluru",
+    "mumbai",
+    "delhi",
+    "hyderabad",
+    "kochi",
+    "madurai",
+    "salem",
+    "tiruppur",
+
+    "tamil nadu",
+    "kerala",
+    "india"
+  ];
+
+  const locationWords = [
+
+    "where",
+    "best",
+    "restaurant",
+    "hotel",
+    "cafe",
+    "mall",
+    "near",
+    "open",
+    "price",
+    "weather",
+    "today",
+    "latest",
+    "recommend",
+    "located"
+  ];
+
+  for (
+    const location of locations
   ) {
-    return true;
+
+    if (
+      q.includes(location)
+    ) {
+
+      for (
+        const word of locationWords
+      ) {
+
+        if (
+          q.includes(word)
+        ) {
+          return true;
+        }
+      }
+    }
   }
 
   return false;
@@ -288,118 +414,115 @@ function needsWebSearch(question) {
 // TAVILY WEB SEARCH
 // ==================================================
 
-async function searchWeb(question) {
-  console.log("");
-  console.log("================================");
-  console.log("TAVILY WEB SEARCH");
-  console.log("================================");
+async function searchWeb(
+  question
+) {
 
   if (!TAVILY_API_KEY) {
+    return "";
+  }
+
+  try {
+
+    const response =
+      await fetch(
+        "https://api.tavily.com/search",
+        {
+          method: "POST",
+
+          headers: {
+            Authorization:
+              "Bearer " +
+              TAVILY_API_KEY,
+
+            "Content-Type":
+              "application/json"
+          },
+
+          body: JSON.stringify({
+
+            query:
+              question,
+
+            search_depth:
+              "basic",
+
+            topic:
+              "general",
+
+            max_results:
+              3,
+
+            include_answer:
+              true,
+
+            include_raw_content:
+              false
+          })
+        }
+      );
+
+    if (!response.ok) {
+
+      console.log(
+        "Tavily failed:",
+        response.status
+      );
+
+      return "";
+    }
+
+    const data =
+      await response.json();
+
+    let information = "";
+
+    if (
+      data &&
+      data.answer
+    ) {
+
+      information +=
+        data.answer + " ";
+    }
+
+    if (
+      data &&
+      Array.isArray(
+        data.results
+      )
+    ) {
+
+      for (
+        const result of
+          data.results
+      ) {
+
+        if (!result) {
+          continue;
+        }
+
+        information +=
+          (result.title || "") +
+          ": " +
+          (result.content || "") +
+          " ";
+      }
+    }
+
+    return information
+      .replace(/\s+/g, " ")
+      .trim();
+
+  } catch (error) {
+
     console.log(
-      "Tavily key missing - skipping web search."
+      "Tavily error:",
+      error.message
     );
 
     return "";
   }
-
-  const response =
-    await fetch(
-      "https://api.tavily.com/search",
-      {
-        method: "POST",
-
-        headers: {
-          "Content-Type":
-            "application/json"
-        },
-
-        body: JSON.stringify({
-          api_key:
-            TAVILY_API_KEY,
-
-          query:
-            question,
-
-          search_depth:
-            "basic",
-
-          topic:
-            "general",
-
-          max_results:
-            5,
-
-          include_answer:
-            true,
-
-          include_raw_content:
-            false
-        })
-      }
-    );
-
-  if (!response.ok) {
-    const errorText =
-      await response.text();
-
-    throw new Error(
-      `Tavily ${response.status}: ${errorText}`
-    );
-  }
-
-  const data =
-    await response.json();
-
-  console.log(
-    "Tavily results:",
-    data?.results?.length || 0
-  );
-
-  let context = "";
-
-  // Tavily's generated answer
-  if (data?.answer) {
-    context +=
-      `Tavily answer: ${data.answer}\n\n`;
-  }
-
-  // Search results
-  const results =
-    Array.isArray(data?.results)
-      ? data.results
-      : [];
-
-  for (
-    let i = 0;
-    i < results.length;
-    i++
-  ) {
-    const result =
-      results[i];
-
-    context +=
-      `SOURCE ${i + 1}\n`;
-
-    context +=
-      `Title: ${result?.title || ""}\n`;
-
-    context +=
-      `URL: ${result?.url || ""}\n`;
-
-    context +=
-      `Content: ${result?.content || ""}\n\n`;
-  }
-
-  // Prevent an enormous prompt
-  context =
-    context.slice(0, 12000);
-
-  console.log(
-    "Web context length:",
-    context.length
-  );
-
-  return context;
 }
 
 // ==================================================
@@ -408,224 +531,243 @@ async function searchWeb(question) {
 
 async function askGroq(
   question,
-  webContext = ""
+  conversationHistory,
+  webInformation
 ) {
-  console.log("");
-  console.log("================================");
-  console.log("GROQ LLAMA 3.1 8B");
-  console.log("================================");
 
-  const usingWeb =
-    Boolean(webContext);
+  const messages = [
 
-  let systemPrompt;
+    {
+      role: "system",
 
-  if (usingWeb) {
-    systemPrompt =
-      "You are a fast phone voice assistant. " +
-      "Answer the caller using the web search information provided below. " +
-      "The web information is the source of truth for current information. " +
-      "Never claim you cannot access current information when web information is provided. " +
-      "For local recommendations, clearly name the relevant places. " +
-      "For location questions, give the location/address when available. " +
-      "Do not mention Tavily, web search, APIs, prompts, or sources unless necessary. " +
-      "Keep the answer short and natural because it will be spoken over a phone call. " +
-      "Do not use markdown, bullet points, emojis, or long explanations.\n\n" +
-      "WEB INFORMATION:\n" +
-      webContext;
-  } else {
-    systemPrompt =
-      "You are a fast phone voice assistant. " +
-      "Answer naturally and conversationally. " +
-      "Keep answers short because they will be spoken over a phone call. " +
-      "Do not use markdown, bullet points, emojis, or long explanations. " +
-      "Give the direct answer first.";
+      content:
+        "You are a fast, friendly AI phone assistant. " +
+
+        "You are NOT Google Assistant, Siri or Alexa. " +
+
+        "Never call yourself Google Assistant. " +
+
+        "Talk naturally like a helpful person on the phone. " +
+
+        "Be friendly and casual, not overly formal. " +
+
+        "Keep answers concise because they are spoken aloud. " +
+
+        "Normally answer in 1 to 4 short sentences. " +
+
+        "However, if the caller asks a larger question, give enough information to properly answer it. " +
+
+        "Do not unnecessarily cut off important information. " +
+
+        "Do not use markdown, bullet points, emojis or long introductions. " +
+
+        "Do not mention APIs, Tavily, Groq, Deepgram or internal tools. " +
+
+        "Remember the conversation during the current phone call. " +
+
+        "Use previous questions and answers when the caller refers to something indirectly. " +
+
+        "For example, understand 'what about the first one?', 'how much is it?', 'where is it?', and 'tell me more'. " +
+
+        "If web information is provided, use it for current facts. " +
+
+        "Never invent current prices, opening hours, locations or news. " +
+
+        "For simple questions, answer immediately and naturally."
+    }
+  ];
+
+  // ----------------------------------------------
+  // MEMORY
+  // ----------------------------------------------
+
+  for (
+    const message of
+      conversationHistory
+  ) {
+
+    messages.push({
+      role:
+        message.role,
+
+      content:
+        message.content
+    });
   }
+
+  // ----------------------------------------------
+  // WEB INFORMATION
+  // ----------------------------------------------
+
+  if (
+    webInformation
+  ) {
+
+    messages.push({
+
+      role:
+        "system",
+
+      content:
+        "Current web information for the caller's question: " +
+        webInformation
+    });
+  }
+
+  // ----------------------------------------------
+  // QUESTION
+  // ----------------------------------------------
+
+  messages.push({
+
+    role:
+      "user",
+
+    content:
+      question
+  });
+
+  // ----------------------------------------------
+  // GROQ
+  // ----------------------------------------------
 
   const completion =
     await groq.chat.completions.create({
+
       model:
-        "llama-3.1-8b-instant",
+        GROQ_MODEL,
 
-      messages: [
-        {
-          role: "system",
-          content:
-            systemPrompt
-        },
-        {
-          role: "user",
-          content:
-            question
-        }
-      ],
+      messages:
+        messages,
 
-      temperature: 0.2,
+      temperature:
+        0.3,
 
-      max_tokens: 160,
+      // ==========================================
+      // 150 TOKENS
+      // ==========================================
 
-      stream: false
+      max_tokens:
+        150,
+
+      top_p:
+        0.9,
+
+      stream:
+        false
     });
 
   const choice =
-    completion?.choices?.[0];
+    completion &&
+    completion.choices &&
+    completion.choices[0]
+      ? completion.choices[0]
+      : null;
 
-  const message =
-    choice?.message;
+  if (!choice) {
 
-  const rawContent =
-    message?.content;
+    throw new Error(
+      "Groq returned no choices"
+    );
+  }
 
-  console.log(
-    "Groq finish reason:",
-    choice?.finish_reason
-  );
+  const answer =
+    choice.message &&
+    typeof choice.message.content ===
+      "string"
+      ? choice.message.content
+      : "";
 
-  console.log(
-    "Groq raw content:",
-    rawContent
-  );
-
-  let answer =
-    String(
-      rawContent || ""
-    )
+  const text =
+    answer
       .replace(/\s+/g, " ")
       .trim();
 
-  // ==================================================
-  // EMPTY RESPONSE PROTECTION
-  // ==================================================
-
-  if (!answer) {
-    console.log(
-      "Groq returned empty content."
-    );
-
-    // If Groq finishes because of token limit,
-    // try one very small emergency request.
-    if (
-      choice?.finish_reason ===
-      "length"
-    ) {
-      console.log(
-        "Retrying Groq with smaller response..."
-      );
-
-      const retry =
-        await groq.chat.completions.create({
-          model:
-            "llama-3.1-8b-instant",
-
-          messages: [
-            {
-              role: "system",
-              content:
-                "Answer the caller in one short sentence. " +
-                "Return ONLY the spoken answer."
-            },
-            {
-              role: "user",
-              content:
-                question
-            }
-          ],
-
-          temperature: 0.1,
-
-          max_tokens: 80,
-
-          stream: false
-        });
-
-      answer =
-        String(
-          retry?.choices?.[0]
-            ?.message?.content || ""
-        )
-          .replace(/\s+/g, " ")
-          .trim();
-    }
-  }
-
-  if (!answer) {
-    throw new Error(
-      "Groq returned an empty answer"
-    );
-  }
-
   console.log(
-    "FINAL AI ANSWER:",
-    answer
+    "Groq finish reason:",
+    choice.finish_reason
   );
 
-  return answer;
+  console.log(
+    "AI ANSWER:",
+    text
+  );
+
+  if (!text) {
+
+    throw new Error(
+      "Groq returned empty content"
+    );
+  }
+
+  return text;
 }
 
 // ==================================================
 // DEEPGRAM TTS
 // ==================================================
 
-async function synthesizeSpeech(text) {
-  console.log("");
-  console.log("================================");
-  console.log("DEEPGRAM TTS");
-  console.log("================================");
+async function synthesizeSpeech(
+  text
+) {
 
   let cleanText =
     String(text)
       .replace(/\s+/g, " ")
       .trim();
 
-  // Keep phone answers short
+  // Keep spoken responses reasonably short.
   cleanText =
-    cleanText.slice(0, 900);
-
-  const url =
-    "https://api.deepgram.com/v1/speak" +
-    "?model=aura-2-thalia-en" +
-    "&encoding=linear16" +
-    "&sample_rate=8000";
+    cleanText.slice(
+      0,
+      700
+    );
 
   const response =
-    await fetch(url, {
-      method: "POST",
+    await fetch(
+      "https://api.deepgram.com/v1/speak" +
+      "?model=aura-2-thalia-en" +
+      "&encoding=linear16" +
+      "&sample_rate=8000",
+      {
+        method: "POST",
 
-      headers: {
-        Authorization:
-          `Token ${DEEPGRAM_API_KEY}`,
+        headers: {
 
-        "Content-Type":
-          "application/json"
-      },
+          Authorization:
+            "Token " +
+            DEEPGRAM_API_KEY,
 
-      body:
-        JSON.stringify({
-          text: cleanText
+          "Content-Type":
+            "application/json"
+        },
+
+        body: JSON.stringify({
+          text:
+            cleanText
         })
-    });
+      }
+    );
 
   if (!response.ok) {
+
     const errorText =
       await response.text();
 
     throw new Error(
-      `Deepgram TTS ${response.status}: ${errorText}`
+      "Deepgram TTS " +
+      response.status +
+      ": " +
+      errorText
     );
   }
 
   const arrayBuffer =
     await response.arrayBuffer();
 
-  const audioBuffer =
-    Buffer.from(arrayBuffer);
-
-  console.log(
-    "TTS bytes:",
-    audioBuffer.length
+  return Buffer.from(
+    arrayBuffer
   );
-
-  return audioBuffer;
 }
 
 // ==================================================
@@ -637,59 +779,78 @@ function sendAudioToExotel(
   streamSid,
   pcmBuffer
 ) {
+
   if (
     !ws ||
     ws.readyState !==
       WebSocket.OPEN
   ) {
+
     console.log(
-      "Cannot send audio: WebSocket closed."
+      "WebSocket closed."
     );
 
     return;
   }
 
-  // 20ms at 8kHz / 16-bit mono
-  const CHUNK_SIZE = 320;
+  const CHUNK_SIZE =
+    320;
 
-  let sequenceNumber = 1;
-  let chunkNumber = 0;
-  let timestamp = 0;
+  let sequenceNumber =
+    1;
+
+  let chunkNumber =
+    0;
+
+  let timestamp =
+    0;
 
   for (
     let offset = 0;
     offset < pcmBuffer.length;
     offset += CHUNK_SIZE
   ) {
+
     const chunk =
       pcmBuffer.subarray(
         offset,
         Math.min(
-          offset + CHUNK_SIZE,
+          offset +
+            CHUNK_SIZE,
           pcmBuffer.length
         )
       );
 
     ws.send(
       JSON.stringify({
+
         event:
           "media",
 
         sequence_number:
-          String(sequenceNumber),
+          String(
+            sequenceNumber
+          ),
 
         stream_sid:
           streamSid,
 
         media: {
+
           chunk:
-            String(chunkNumber),
+            String(
+              chunkNumber
+            ),
 
           timestamp:
-            String(timestamp),
+            String(
+              timestamp
+            ),
 
           payload:
-            chunk.toString("base64")
+            chunk.toString(
+              "base64"
+            )
         }
       })
     );
@@ -699,14 +860,9 @@ function sendAudioToExotel(
     timestamp += 20;
   }
 
-  console.log(
-    "Sent",
-    chunkNumber,
-    "audio chunks to Exotel."
-  );
-
   ws.send(
     JSON.stringify({
+
       event:
         "mark",
 
@@ -714,47 +870,11 @@ function sendAudioToExotel(
         streamSid,
 
       mark: {
+
         name:
           "ai_response_complete"
       }
     })
-  );
-}
-
-// ==================================================
-// GET AI ANSWER
-// ==================================================
-
-async function getAIAnswer(question) {
-  const shouldSearch =
-    needsWebSearch(question);
-
-  console.log(
-    "Web search required:",
-    shouldSearch
-  );
-
-  let webContext = "";
-
-  if (shouldSearch) {
-    try {
-      webContext =
-        await searchWeb(question);
-    } catch (error) {
-      console.error(
-        "Tavily search failed:",
-        error.message
-      );
-
-      // Continue without web instead of
-      // killing the phone call.
-      webContext = "";
-    }
-  }
-
-  return await askGroq(
-    question,
-    webContext
   );
 }
 
@@ -765,28 +885,23 @@ async function getAIAnswer(question) {
 async function processQuestion(
   ws,
   streamSid,
-  audioBuffer
+  audioBuffer,
+  conversationHistory
 ) {
+
+  const startTime =
+    Date.now();
+
   try {
+
     console.log("");
-    console.log("################################");
-    console.log("PROCESSING CALLER QUESTION");
-    console.log("################################");
+    console.log(
+      "===== PROCESSING QUESTION ====="
+    );
 
-    if (
-      !audioBuffer ||
-      audioBuffer.length < 5000
-    ) {
-      console.log(
-        "Audio too short."
-      );
-
-      return;
-    }
-
-    // ==================================================
+    // ----------------------------------------------
     // STT
-    // ==================================================
+    // ----------------------------------------------
 
     const question =
       await transcribeAudio(
@@ -794,6 +909,7 @@ async function processQuestion(
       );
 
     if (!question) {
+
       console.log(
         "No speech detected."
       );
@@ -806,27 +922,114 @@ async function processQuestion(
       question
     );
 
-    // ==================================================
-    // WEB + LLM
-    // ==================================================
+    console.log(
+      "STT:",
+      Date.now() -
+      startTime +
+      "ms"
+    );
 
-    const answer =
-      await getAIAnswer(
+    // ----------------------------------------------
+    // WEB SEARCH
+    // ----------------------------------------------
+
+    let webInformation =
+      "";
+
+    if (
+      needsWebSearch(
         question
+      )
+    ) {
+
+      console.log(
+        "WEB SEARCH: YES"
       );
 
-    // ==================================================
+      webInformation =
+        await searchWeb(
+          question
+        );
+
+    } else {
+
+      console.log(
+        "WEB SEARCH: NO"
+      );
+    }
+
+    // ----------------------------------------------
+    // LLM
+    // ----------------------------------------------
+
+    const answer =
+      await askGroq(
+        question,
+        conversationHistory,
+        webInformation
+      );
+
+    console.log(
+      "LLM:",
+      Date.now() -
+      startTime +
+      "ms"
+    );
+
+    // ----------------------------------------------
+    // MEMORY
+    // ----------------------------------------------
+
+    conversationHistory.push({
+
+      role:
+        "user",
+
+      content:
+        question
+    });
+
+    conversationHistory.push({
+
+      role:
+        "assistant",
+
+      content:
+        answer
+    });
+
+    // Keep only recent conversation.
+    if (
+      conversationHistory.length >
+      12
+    ) {
+
+      conversationHistory.splice(
+        0,
+        conversationHistory.length -
+        12
+      );
+    }
+
+    // ----------------------------------------------
     // TTS
-    // ==================================================
+    // ----------------------------------------------
 
     const speech =
       await synthesizeSpeech(
         answer
       );
 
-    // ==================================================
-    // EXOTEL
-    // ==================================================
+    console.log(
+      "TTS:",
+      Date.now() -
+      startTime +
+      "ms"
+    );
+
+    // ----------------------------------------------
+    // SEND
+    // ----------------------------------------------
 
     sendAudioToExotel(
       ws,
@@ -835,14 +1038,22 @@ async function processQuestion(
     );
 
     console.log(
-      "ANSWER SENT TO CALLER"
+      "TOTAL:",
+      Date.now() -
+      startTime +
+      "ms"
+    );
+
+    console.log(
+      "===== ANSWER SENT ====="
     );
 
   } catch (error) {
+
     console.log("");
-    console.log("################################");
-    console.log("VOICE PROCESSING ERROR");
-    console.log("################################");
+    console.log(
+      "===== VOICE PROCESSING ERROR ====="
+    );
 
     console.error(
       error
@@ -857,33 +1068,64 @@ async function processQuestion(
 wss.on(
   "connection",
   (ws) => {
-    console.log("");
-    console.log("================================");
-    console.log("EXOTEL WEBSOCKET CONNECTED");
-    console.log("================================");
 
-    let streamSid = null;
-    let callSid = null;
+    console.log(
+      "EXOTEL WEBSOCKET CONNECTED"
+    );
 
-    let audioChunks = [];
+    let streamSid =
+      null;
 
-    let speechStarted = false;
-    let silenceFrames = 0;
-    let processing = false;
+    let callSid =
+      null;
 
-    // 20ms frames
-    const SILENCE_FRAME_LIMIT = 25;
+    // ----------------------------------------------
+    // CONVERSATION MEMORY
+    // ----------------------------------------------
 
-    // Lower than before = faster detection
-    const SPEECH_THRESHOLD = 300;
+    let conversationHistory =
+      [];
+
+    // ----------------------------------------------
+    // SPEECH BUFFER
+    // ----------------------------------------------
+
+    let audioChunks =
+      [];
+
+    let speechStarted =
+      false;
+
+    let silenceFrames =
+      0;
+
+    let processing =
+      false;
+
+    // ----------------------------------------------
+    // FAST SPEECH DETECTION
+    // ----------------------------------------------
+
+    const SILENCE_FRAME_LIMIT =
+      18;
+
+    const SPEECH_THRESHOLD =
+      350;
 
     function resetSpeech() {
-      audioChunks = [];
-      speechStarted = false;
-      silenceFrames = 0;
+
+      audioChunks =
+        [];
+
+      speechStarted =
+        false;
+
+      silenceFrames =
+        0;
     }
 
     async function finishSpeech() {
+
       if (processing) {
         return;
       }
@@ -891,44 +1133,48 @@ wss.on(
       if (
         audioChunks.length === 0
       ) {
+
         resetSpeech();
+
         return;
       }
 
-      processing = true;
+      processing =
+        true;
 
       const fullAudio =
         Buffer.concat(
           audioChunks
         );
 
-      console.log("");
-      console.log("================================");
-      console.log("END OF SPEECH");
-      console.log(
-        "Audio:",
-        fullAudio.length,
-        "bytes"
-      );
-      console.log("================================");
-
       resetSpeech();
 
       try {
+
         await processQuestion(
           ws,
           streamSid,
-          fullAudio
+          fullAudio,
+          conversationHistory
         );
+
       } finally {
-        processing = false;
+
+        processing =
+          false;
       }
     }
+
+    // ==================================================
+    // EXOTEL MESSAGES
+    // ==================================================
 
     ws.on(
       "message",
       async (data) => {
+
         try {
+
           const message =
             JSON.parse(
               data.toString()
@@ -937,41 +1183,50 @@ wss.on(
           const event =
             message.event;
 
-          console.log(
-            "Event:",
-            event
-          );
-
-          // ==================================================
+          // --------------------------------------------
           // CONNECTED
-          // ==================================================
+          // --------------------------------------------
 
           if (
-            event === "connected"
+            event ===
+            "connected"
           ) {
+
             console.log(
-              "Exotel WebSocket connected."
+              "Exotel connected."
             );
 
             return;
           }
 
-          // ==================================================
+          // --------------------------------------------
           // START
-          // ==================================================
+          // --------------------------------------------
 
           if (
-            event === "start"
+            event ===
+            "start"
           ) {
+
             streamSid =
               message.stream_sid ||
-              message.start?.stream_sid ||
-              message.start?.streamSid ||
+              (
+                message.start &&
+                (
+                  message.start.stream_sid ||
+                  message.start.streamSid
+                )
+              ) ||
               null;
 
             callSid =
-              message.start?.call_sid ||
-              message.start?.callSid ||
+              (
+                message.start &&
+                (
+                  message.start.call_sid ||
+                  message.start.callSid
+                )
+              ) ||
               null;
 
             console.log(
@@ -984,26 +1239,29 @@ wss.on(
               callSid
             );
 
-            console.log(
-              "Audio format:",
-              message.start?.media_format
-            );
+            // New call = new memory.
+            conversationHistory =
+              [];
 
             resetSpeech();
 
             return;
           }
 
-          // ==================================================
+          // --------------------------------------------
           // MEDIA
-          // ==================================================
+          // --------------------------------------------
 
           if (
-            event === "media"
+            event ===
+            "media"
           ) {
+
             if (
-              !message.media?.payload
+              !message.media ||
+              !message.media.payload
             ) {
+
               return;
             }
 
@@ -1013,42 +1271,43 @@ wss.on(
                 "base64"
               );
 
+            // Don't listen for a new question
+            // while answering the previous one.
+            if (
+              processing
+            ) {
+
+              return;
+            }
+
             const level =
               getAudioLevel(
                 audio
               );
 
-            console.log(
-              "Audio:",
-              audio.length,
-              "bytes | level:",
-              Math.round(level)
-            );
-
-            // Don't collect audio while
-            // processing the previous question.
-            if (processing) {
-              return;
-            }
-
-            // ==================================================
-            // SPEECH START
-            // ==================================================
+            // ------------------------------------------
+            // SPEECH
+            // ------------------------------------------
 
             if (
               level >
               SPEECH_THRESHOLD
             ) {
-              if (!speechStarted) {
-                console.log(
-                  ">>> SPEECH STARTED"
-                );
+
+              if (
+                !speechStarted
+              ) {
 
                 speechStarted =
                   true;
+
+                console.log(
+                  ">>> SPEECH STARTED"
+                );
               }
 
-              silenceFrames = 0;
+              silenceFrames =
+                0;
 
               audioChunks.push(
                 audio
@@ -1057,13 +1316,14 @@ wss.on(
               return;
             }
 
-            // ==================================================
-            // SPEECH CONTINUATION
-            // ==================================================
+            // ------------------------------------------
+            // SILENCE
+            // ------------------------------------------
 
             if (
               speechStarted
             ) {
+
               audioChunks.push(
                 audio
               );
@@ -1074,6 +1334,7 @@ wss.on(
                 silenceFrames >=
                 SILENCE_FRAME_LIMIT
               ) {
+
                 await finishSpeech();
               }
             }
@@ -1081,62 +1342,66 @@ wss.on(
             return;
           }
 
-          // ==================================================
+          // --------------------------------------------
           // DTMF
-          // ==================================================
+          // --------------------------------------------
 
           if (
-            event === "dtmf"
+            event ===
+            "dtmf"
           ) {
+
             console.log(
               "DTMF:",
-              message.dtmf?.digit
+              message.dtmf
+                ? message.dtmf.digit
+                : ""
             );
 
             return;
           }
 
-          // ==================================================
+          // --------------------------------------------
           // MARK
-          // ==================================================
+          // --------------------------------------------
 
           if (
-            event === "mark"
+            event ===
+            "mark"
           ) {
-            console.log(
-              "Exotel mark:",
-              message.mark?.name
-            );
 
             return;
           }
 
-          // ==================================================
+          // --------------------------------------------
           // CLEAR
-          // ==================================================
+          // --------------------------------------------
 
           if (
-            event === "clear"
+            event ===
+            "clear"
           ) {
-            console.log(
-              "Exotel CLEAR received."
-            );
 
             resetSpeech();
 
             return;
           }
 
-          // ==================================================
+          // --------------------------------------------
           // STOP
-          // ==================================================
+          // --------------------------------------------
 
           if (
-            event === "stop"
+            event ===
+            "stop"
           ) {
+
             console.log(
-              "Stream stopped."
+              "CALL ENDED"
             );
+
+            conversationHistory =
+              [];
 
             resetSpeech();
 
@@ -1144,6 +1409,7 @@ wss.on(
           }
 
         } catch (error) {
+
           console.log(
             "Message parsing error:",
             error.message
@@ -1159,9 +1425,15 @@ wss.on(
     ws.on(
       "close",
       () => {
+
         console.log(
           "Exotel WebSocket disconnected."
         );
+
+        conversationHistory =
+          [];
+
+        resetSpeech();
       }
     );
 
@@ -1172,6 +1444,7 @@ wss.on(
     ws.on(
       "error",
       (error) => {
+
         console.log(
           "WebSocket error:",
           error.message
@@ -1189,42 +1462,48 @@ server.listen(
   PORT,
   "0.0.0.0",
   () => {
+
     console.log("");
-    console.log("--------------------------------");
-    console.log("AI VOICE BRIDGE");
-    console.log("--------------------------------");
+    console.log(
+      "================================"
+    );
 
     console.log(
-      "HTTP:",
-      `http://localhost:${PORT}`
+      "AI VOICE BRIDGE"
+    );
+
+    console.log(
+      "================================"
+    );
+
+    console.log(
+      "Model:",
+      GROQ_MODEL
+    );
+
+    console.log(
+      "STT: Deepgram Nova-3"
+    );
+
+    console.log(
+      "TTS: Deepgram Aura-2"
+    );
+
+    console.log(
+      "Web Search: Tavily"
     );
 
     console.log(
       "WebSocket:",
-      `ws://localhost:${PORT}`
-    );
-
-    console.log(
-      "Public WebSocket:",
       WS_URL
     );
 
-    console.log("");
     console.log(
-      "Groq: llama-3.1-8b-instant"
+      "Max LLM tokens: 150"
     );
 
     console.log(
-      "Deepgram: STT + TTS"
-    );
-
-    console.log(
-      "Tavily: live web search"
-    );
-
-    console.log("");
-    console.log(
-      "Waiting for Exotel..."
+      "================================"
     );
   }
 );
