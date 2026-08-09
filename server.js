@@ -1,4 +1,3 @@
-```js
 const http = require("http");
 const WebSocket = require("ws");
 const Groq = require("groq-sdk");
@@ -19,18 +18,9 @@ const WS_URL =
 // ENVIRONMENT VARIABLES
 // ==================================================
 
-const GROQ_API_KEY =
-  process.env.GROQ_API_KEY;
-
-const DEEPGRAM_API_KEY =
-  process.env.DEEPGRAM_API_KEY;
-
-const TAVILY_API_KEY =
-  process.env.TAVILY_API_KEY;
-
-// ==================================================
-// REQUIRED KEYS
-// ==================================================
+const GROQ_API_KEY = process.env.GROQ_API_KEY;
+const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
+const TAVILY_API_KEY = process.env.TAVILY_API_KEY;
 
 if (!GROQ_API_KEY) {
   throw new Error("GROQ_API_KEY is missing");
@@ -41,9 +31,7 @@ if (!DEEPGRAM_API_KEY) {
 }
 
 if (!TAVILY_API_KEY) {
-  console.warn(
-    "WARNING: TAVILY_API_KEY is missing. Live web search will be disabled."
-  );
+  console.warn("WARNING: TAVILY_API_KEY is missing");
 }
 
 // ==================================================
@@ -58,117 +46,75 @@ const groq = new Groq({
 // HTTP SERVER
 // ==================================================
 
-const server = http.createServer(
-  async (req, res) => {
+const server = http.createServer(async (req, res) => {
+  console.log("HTTP:", req.method, req.url);
 
-    console.log(
-      "HTTP request:",
-      req.method,
-      req.url
-    );
-
-    if (req.url === "/health") {
-
-      res.writeHead(200, {
-        "Content-Type":
-          "application/json"
-      });
-
-      res.end(
-        JSON.stringify({
-          status: "ok",
-          service: "ai-voice-bridge",
-          groq: "configured",
-          deepgram: "configured",
-          tavily:
-            TAVILY_API_KEY
-              ? "configured"
-              : "missing"
-        })
-      );
-
-      return;
-    }
-
+  if (req.url === "/health") {
     res.writeHead(200, {
-      "Content-Type":
-        "application/json"
+      "Content-Type": "application/json"
     });
 
     res.end(
       JSON.stringify({
         status: "ok",
-        websocket: WS_URL
+        service: "ai-voice-bridge"
       })
     );
+
+    return;
   }
-);
 
-// ==================================================
-// WEBSOCKET
-// ==================================================
-
-const wss =
-  new WebSocket.Server({
-    server
+  res.writeHead(200, {
+    "Content-Type": "application/json"
   });
+
+  res.end(
+    JSON.stringify({
+      status: "ok",
+      websocket: WS_URL
+    })
+  );
+});
+
+// ==================================================
+// WEBSOCKET SERVER
+// ==================================================
+
+const wss = new WebSocket.Server({
+  server
+});
 
 // ==================================================
 // AUDIO LEVEL
 // ==================================================
 
 function getAudioLevel(buffer) {
-
-  if (
-    !buffer ||
-    buffer.length < 2
-  ) {
+  if (!buffer || buffer.length < 2) {
     return 0;
   }
 
   let total = 0;
 
-  const samples =
-    Math.floor(
-      buffer.length / 2
-    );
+  const samples = Math.floor(buffer.length / 2);
 
-  for (
-    let i = 0;
-    i < samples;
-    i++
-  ) {
-
+  for (let i = 0; i < samples; i++) {
     total += Math.abs(
-      buffer.readInt16LE(
-        i * 2
-      )
+      buffer.readInt16LE(i * 2)
     );
   }
 
-  return (
-    total / samples
-  );
+  return total / samples;
 }
 
 // ==================================================
 // DEEPGRAM STT
 // ==================================================
 
-async function transcribeAudio(
-  pcmBuffer
-) {
-
+async function transcribeAudio(pcmBuffer) {
   console.log("");
-  console.log(
-    "================================"
-  );
-  console.log(
-    "DEEPGRAM SPEECH TO TEXT"
-  );
-  console.log(
-    "================================"
-  );
+  console.log("================================");
+  console.log("DEEPGRAM STT");
+  console.log("================================");
 
   const url =
     "https://api.deepgram.com/v1/listen" +
@@ -177,168 +123,100 @@ async function transcribeAudio(
     "&encoding=linear16" +
     "&sample_rate=8000" +
     "&channels=1" +
-    "&smart_format=true" +
-    "&punctuate=true";
+    "&smart_format=true";
 
-  const response =
-    await fetch(
-      url,
-      {
-        method: "POST",
+  const response = await fetch(url, {
+    method: "POST",
 
-        headers: {
-          Authorization:
-            `Token ${DEEPGRAM_API_KEY}`,
+    headers: {
+      Authorization: `Token ${DEEPGRAM_API_KEY}`,
+      "Content-Type": "audio/raw"
+    },
 
-          "Content-Type":
-            "audio/raw"
-        },
-
-        body:
-          pcmBuffer
-      }
-    );
+    body: pcmBuffer
+  });
 
   if (!response.ok) {
-
-    const errorText =
-      await response.text();
+    const errorText = await response.text();
 
     throw new Error(
       `Deepgram STT ${response.status}: ${errorText}`
     );
   }
 
-  const data =
-    await response.json();
+  const data = await response.json();
 
   const transcript =
-    data
-      ?.results
-      ?.channels?.[0]
+    data?.results?.channels?.[0]
       ?.alternatives?.[0]
-      ?.transcript ||
-    "";
+      ?.transcript || "";
 
-  const text =
-    String(transcript)
-      .replace(/\s+/g, " ")
-      .trim();
+  const text = String(transcript)
+    .replace(/\s+/g, " ")
+    .trim();
 
-  console.log(
-    "TRANSCRIPTION:",
-    text
-  );
+  console.log("TRANSCRIPTION:", text);
 
   return text;
 }
 
 // ==================================================
-// DETECT LIVE / CURRENT INFORMATION
+// DETECT WHETHER QUESTION NEEDS LIVE WEB
 // ==================================================
 
-function needsLiveSearch(
-  question
-) {
+function needsLiveWeb(question) {
+  const text = String(question)
+    .toLowerCase()
+    .trim();
 
-  const q =
-    String(question)
-      .toLowerCase()
-      .trim();
-
-  const liveKeywords = [
-
-    // Time / date
+  const realtimeWords = [
     "right now",
     "currently",
     "current",
     "today",
     "tonight",
     "this morning",
+    "this afternoon",
     "this evening",
-    "tomorrow",
-    "yesterday",
-
-    // Recency
     "latest",
     "recent",
     "recently",
-    "newest",
-    "breaking",
-    "just happened",
-    "what happened",
-
-    // News
     "news",
-    "headline",
-    "headlines",
-    "update",
-    "updates",
-
-    // Weather
+    "breaking",
+    "live",
+    "real time",
+    "realtime",
     "weather",
     "temperature",
-    "forecast",
-    "rain",
-    "raining",
-
-    // Sports
-    "score",
-    "scores",
-    "match",
-    "game",
-    "live score",
-    "standings",
-    "fixture",
-
-    // Money / markets
-    "stock price",
-    "share price",
     "stock",
-    "shares",
-    "bitcoin price",
-    "crypto price",
+    "stocks",
+    "share price",
+    "price today",
+    "crypto",
+    "bitcoin",
+    "ethereum",
     "exchange rate",
-    "currency rate",
-    "price of",
-    "cost of",
-
-    // Traffic / travel
+    "usd",
+    "inr",
+    "election",
+    "president",
+    "prime minister",
+    "score",
+    "match",
+    "game today",
+    "games today",
+    "schedule",
     "traffic",
-    "flight status",
     "flight",
-    "train status",
-    "train",
-    "bus status",
-
-    // Availability
-    "available now",
-    "open now",
-    "is it open",
+    "flights",
+    "event",
+    "events",
     "opening hours",
-
-    // Explicit web requests
-    "search the web",
-    "look it up",
-    "look online",
-    "check online",
-    "on the internet",
-    "online",
-
-    // Current people / positions
-    "who is the current",
-    "who is currently",
-    "who currently",
-
-    // Explicit temporal phrases
-    "as of today",
-    "as of now",
-    "at the moment"
+    "open now"
   ];
 
-  return liveKeywords.some(
-    keyword =>
-      q.includes(keyword)
+  return realtimeWords.some((word) =>
+    text.includes(word)
   );
 }
 
@@ -346,284 +224,196 @@ function needsLiveSearch(
 // TAVILY WEB SEARCH
 // ==================================================
 
-async function searchWeb(
-  question
-) {
-
+async function searchWeb(question) {
   if (!TAVILY_API_KEY) {
-
     console.log(
-      "Tavily key missing. Skipping web search."
+      "Tavily unavailable: TAVILY_API_KEY missing"
     );
 
-    return null;
+    return "";
   }
 
   console.log("");
-  console.log(
-    "================================"
-  );
-  console.log(
-    "TAVILY LIVE WEB SEARCH"
-  );
-  console.log(
-    "================================"
-  );
+  console.log("================================");
+  console.log("TAVILY LIVE WEB SEARCH");
+  console.log("================================");
 
-  console.log(
-    "Search:",
-    question
-  );
-
-  const response =
-    await fetch(
+  try {
+    const response = await fetch(
       "https://api.tavily.com/search",
       {
         method: "POST",
 
         headers: {
-          Authorization:
-            `Bearer ${TAVILY_API_KEY}`,
-
-          "Content-Type":
-            "application/json"
+          "Content-Type": "application/json"
         },
 
-        body:
-          JSON.stringify({
+        body: JSON.stringify({
+          api_key: TAVILY_API_KEY,
 
-            query:
-              question,
+          query: question,
 
-            search_depth:
-              "fast",
+          search_depth: "basic",
 
-            topic:
-              "general",
+          topic: "general",
 
-            max_results:
-              4,
+          max_results: 4,
 
-            include_answer:
-              "basic",
+          include_answer: true,
 
-            include_raw_content:
-              false
-          })
+          include_raw_content: false
+        })
       }
     );
 
-  if (!response.ok) {
+    if (!response.ok) {
+      const errorText =
+        await response.text();
 
-    const errorText =
-      await response.text();
+      console.error(
+        "Tavily error:",
+        response.status,
+        errorText
+      );
 
-    throw new Error(
-      `Tavily ${response.status}: ${errorText}`
-    );
-  }
+      return "";
+    }
 
-  const data =
-    await response.json();
+    const data =
+      await response.json();
 
-  const answer =
-    data?.answer || "";
+    const parts = [];
 
-  const results =
-    Array.isArray(
-      data?.results
-    )
-      ? data.results
-      : [];
+    if (data.answer) {
+      parts.push(
+        `Tavily summary: ${data.answer}`
+      );
+    }
 
-  console.log(
-    "Tavily results:",
-    results.length
-  );
+    if (Array.isArray(data.results)) {
+      for (const result of data.results) {
+        if (!result) {
+          continue;
+        }
 
-  if (answer) {
+        const title =
+          result.title || "";
 
-    console.log(
-      "Tavily answer:",
-      answer
-    );
-  }
+        const content =
+          result.content || "";
 
-  // ----------------------------------------------
-  // Build compact search context.
-  // Keeping this short reduces Groq latency.
-  // ----------------------------------------------
+        const url =
+          result.url || "";
 
-  const sources =
-    results
-      .slice(0, 4)
-      .map(
-        (result, index) => {
-
-          return (
-            `[Source ${index + 1}] ` +
-            `${result.title || ""}\n` +
-            `${result.url || ""}\n` +
-            `${result.content || ""}`
+        if (content) {
+          parts.push(
+            `Source: ${title}\n` +
+            `URL: ${url}\n` +
+            `Information: ${content}`
           );
         }
-      )
-      .join("\n\n");
+      }
+    }
 
-  if (
-    !answer &&
-    !sources
-  ) {
+    const webContext =
+      parts.join("\n\n");
 
     console.log(
-      "Tavily returned no useful results."
+      "Tavily results received:",
+      data.results?.length || 0
     );
 
-    return null;
+    return webContext;
+  } catch (error) {
+    console.error(
+      "Tavily search failed:",
+      error.message
+    );
+
+    return "";
   }
-
-  return {
-    answer:
-      String(answer)
-        .replace(/\s+/g, " ")
-        .trim(),
-
-    sources
-  };
 }
 
 // ==================================================
 // GROQ LLM
 // ==================================================
 
-async function askGroq(
-  question,
-  webContext = null
-) {
-
+async function askGroq(question, webContext = "") {
   console.log("");
-  console.log(
-    "================================"
-  );
-  console.log(
-    "GROQ GPT-OSS 20B"
-  );
-  console.log(
-    "================================"
-  );
+  console.log("================================");
+  console.log("GROQ GPT-OSS 20B");
+  console.log("================================");
 
-  const liveSearchUsed =
+  const liveInfoAvailable =
     Boolean(webContext);
 
-  let userPrompt;
+  let systemPrompt =
+    "You are a fast, natural phone voice assistant. " +
+    "Your response will be spoken aloud over a telephone call. " +
+    "Answer directly and conversationally. " +
+    "Keep answers concise, normally 1 to 4 sentences. " +
+    "Do not use markdown, bullet points, emojis, citations, URLs, " +
+    "or formatting that sounds unnatural when spoken. " +
+    "Never say that you searched the web unless the caller asks. ";
 
-  // ----------------------------------------------
-  // NORMAL QUESTION
-  // ----------------------------------------------
-
-  if (!webContext) {
-
-    userPrompt =
-      `Caller question:\n${question}\n\n` +
-      "Answer the caller directly. " +
-      "Keep it short and natural for a phone call.";
+  if (liveInfoAvailable) {
+    systemPrompt +=
+      "You have been given fresh web information below. " +
+      "Use it when answering the caller's question. " +
+      "Treat the web information as the current source of truth. " +
+      "If the information is insufficient, say that you are not certain " +
+      "rather than inventing a current fact.\n\n" +
+      "FRESH WEB INFORMATION:\n" +
+      webContext;
+  } else {
+    systemPrompt +=
+      "For ordinary questions, answer from your knowledge. " +
+      "Do not pretend that you have live information when you do not.";
   }
-
-  // ----------------------------------------------
-  // LIVE WEB QUESTION
-  // ----------------------------------------------
-
-  else {
-
-    userPrompt =
-      `Caller question:\n${question}\n\n` +
-
-      "This question requires current information. " +
-      "Use ONLY the web information below for current facts. " +
-      "Do not invent current information.\n\n" +
-
-      `Tavily answer:\n${
-        webContext.answer || "No direct answer."
-      }\n\n` +
-
-      `Web sources:\n${
-        webContext.sources || "No source snippets."
-      }\n\n` +
-
-      "Give the caller a concise spoken answer. " +
-      "Do not mention Tavily, sources, searching, prompts, " +
-      "or internal processing. " +
-      "If the web information is uncertain, say so briefly.";
-  }
-
-  const systemPrompt =
-    "You are a fast phone voice assistant. " +
-    "Return ONLY the final answer to speak aloud. " +
-    "Never return reasoning or internal thoughts. " +
-    "Never use markdown, bullet points, emojis, headings, " +
-    "or long explanations. " +
-    "Normally answer in one to three short sentences. " +
-    "Be direct and conversational.";
 
   let completion;
 
   try {
-
     completion =
       await groq.chat.completions.create({
-
-        model:
-          "openai/gpt-oss-20b",
+        model: "openai/gpt-oss-20b",
 
         messages: [
-
           {
             role: "system",
-            content:
-              systemPrompt
+            content: systemPrompt
           },
-
           {
             role: "user",
-            content:
-              userPrompt
+            content: question
           }
-
         ],
 
-        temperature:
-          0.2,
+        temperature: 0.2,
 
-        max_completion_tokens:
-          500,
+        max_completion_tokens: 500,
 
-        reasoning_effort:
-          "low",
-
-        include_reasoning:
-          false,
-
-        stream:
-          false
+        reasoning_effort: "low"
       });
-
   } catch (error) {
-
     console.error(
-      "GPT-OSS request failed:",
+      "Groq request failed:",
       error
     );
 
-    throw error;
+    throw new Error(
+      `Groq request failed: ${error.message}`
+    );
   }
 
   const choice =
-    completion
-      ?.choices?.[0];
+    completion?.choices?.[0];
 
   const finishReason =
-    choice
-      ?.finish_reason;
+    choice?.finish_reason;
+
+  const rawContent =
+    choice?.message?.content;
 
   console.log(
     "Groq finish reason:",
@@ -631,190 +421,157 @@ async function askGroq(
   );
 
   console.log(
-    "Groq usage:",
-    JSON.stringify(
-      completion?.usage || {}
-    )
+    "Groq raw content:",
+    rawContent
   );
 
-  let answer =
-    choice
-      ?.message
-      ?.content || "";
+  // ==================================================
+  // NORMAL CONTENT
+  // ==================================================
 
-  answer =
-    String(answer)
-      .replace(/\s+/g, " ")
-      .trim();
-
-  // ----------------------------------------------
-  // GPT-OSS SOMETIMES RETURNS EMPTY CONTENT
-  // ----------------------------------------------
-
-  if (!answer) {
-
-    console.error(
-      "GPT-OSS returned empty content."
-    );
-
-    console.error(
-      "Raw Groq message:",
-      JSON.stringify(
-        choice?.message || {}
-      )
-    );
-
-    // --------------------------------------------
-    // FAST FALLBACK
-    // --------------------------------------------
-
-    console.log(
-      "Trying fast Groq fallback model..."
-    );
-
-    const fallback =
-      await groq.chat.completions.create({
-
-        model:
-          "llama-3.1-8b-instant",
-
-        messages: [
-
-          {
-            role: "system",
-            content:
-              "You are a fast phone assistant. " +
-              "Answer only the caller's question. " +
-              "Be concise. No markdown. No reasoning."
-          },
-
-          {
-            role: "user",
-            content:
-              userPrompt
-          }
-
-        ],
-
-        temperature:
-          0.2,
-
-        max_completion_tokens:
-          250,
-
-        stream:
-          false
-      });
-
-    let fallbackAnswer =
-      fallback
-        ?.choices?.[0]
-        ?.message
-        ?.content || "";
-
-    fallbackAnswer =
-      String(fallbackAnswer)
+  if (
+    typeof rawContent === "string" &&
+    rawContent.trim()
+  ) {
+    const answer =
+      rawContent
         .replace(/\s+/g, " ")
         .trim();
 
     console.log(
-      "Fallback finish reason:",
-      fallback
-        ?.choices?.[0]
-        ?.finish_reason
+      "GROQ ANSWER:",
+      answer
     );
 
-    console.log(
-      "Fallback answer:",
-      fallbackAnswer
-    );
-
-    if (!fallbackAnswer) {
-
-      // ------------------------------------------
-      // ABSOLUTE LAST RESORT
-      // ------------------------------------------
-
-      return liveSearchUsed
-        ? "I couldn't get the latest information right now. Please try again."
-        : "Sorry, I couldn't process that question. Please try again.";
-    }
-
-    return fallbackAnswer;
+    return answer;
   }
 
+  // ==================================================
+  // FALLBACK
+  // ==================================================
+
   console.log(
-    "Groq answer:",
-    answer
+    "Groq returned empty content."
   );
 
-  return answer;
+  /*
+   * GPT-OSS can occasionally spend the completion
+   * budget on reasoning and return no visible
+   * content.
+   *
+   * Retry once with a larger completion budget
+   * and no reasoning request.
+   */
+
+  console.log(
+    "Retrying Groq..."
+  );
+
+  const retry =
+    await groq.chat.completions.create({
+      model: "openai/gpt-oss-20b",
+
+      messages: [
+        {
+          role: "system",
+          content:
+            "You are a phone voice assistant. " +
+            "Give only the final spoken answer. " +
+            "Do not explain your reasoning. " +
+            "Keep the answer concise."
+        },
+        {
+          role: "user",
+          content:
+            liveInfoAvailable
+              ? (
+                  question +
+                  "\n\nFresh information:\n" +
+                  webContext
+                )
+              : question
+        }
+      ],
+
+      temperature: 0.2,
+
+      max_completion_tokens: 800
+    });
+
+  const retryContent =
+    retry?.choices?.[0]?.message?.content;
+
+  console.log(
+    "Groq retry finish reason:",
+    retry?.choices?.[0]?.finish_reason
+  );
+
+  console.log(
+    "Groq retry content:",
+    retryContent
+  );
+
+  if (
+    typeof retryContent === "string" &&
+    retryContent.trim()
+  ) {
+    return retryContent
+      .replace(/\s+/g, " ")
+      .trim();
+  }
+
+  /*
+   * Last-resort answer.
+   * This prevents the phone call from becoming
+   * completely silent if Groq has a temporary
+   * generation problem.
+   */
+
+  return "Sorry, I had trouble generating that answer. Please try again.";
 }
 
 // ==================================================
 // DEEPGRAM TTS
 // ==================================================
 
-async function synthesizeSpeech(
-  text
-) {
-
+async function synthesizeSpeech(text) {
   console.log("");
-  console.log(
-    "================================"
-  );
-  console.log(
-    "DEEPGRAM TEXT TO SPEECH"
-  );
-  console.log(
-    "================================"
-  );
+  console.log("================================");
+  console.log("DEEPGRAM TTS");
+  console.log("================================");
 
   let cleanText =
     String(text)
       .replace(/\s+/g, " ")
       .trim();
 
-  // Keep phone responses short.
-  cleanText =
-    cleanText.slice(0, 1000);
+  /*
+   * Keep phone responses short.
+   */
 
-  console.log(
-    "TTS:",
-    cleanText
-  );
+  cleanText =
+    cleanText.slice(0, 1200);
 
   const url =
     "https://api.deepgram.com/v1/speak" +
     "?model=aura-2-thalia-en" +
     "&encoding=linear16" +
-    "&sample_rate=8000" +
-    "&container=none";
+    "&sample_rate=8000";
 
-  const response =
-    await fetch(
-      url,
-      {
-        method: "POST",
+  const response = await fetch(url, {
+    method: "POST",
 
-        headers: {
-          Authorization:
-            `Token ${DEEPGRAM_API_KEY}`,
+    headers: {
+      Authorization: `Token ${DEEPGRAM_API_KEY}`,
+      "Content-Type": "application/json"
+    },
 
-          "Content-Type":
-            "application/json"
-        },
-
-        body:
-          JSON.stringify({
-            text:
-              cleanText
-          })
-      }
-    );
+    body: JSON.stringify({
+      text: cleanText
+    })
+  });
 
   if (!response.ok) {
-
     const errorText =
       await response.text();
 
@@ -827,12 +584,10 @@ async function synthesizeSpeech(
     await response.arrayBuffer();
 
   const audioBuffer =
-    Buffer.from(
-      arrayBuffer
-    );
+    Buffer.from(arrayBuffer);
 
   console.log(
-    "TTS PCM:",
+    "TTS audio:",
     audioBuffer.length,
     "bytes"
   );
@@ -849,13 +604,10 @@ function sendAudioToExotel(
   streamSid,
   pcmBuffer
 ) {
-
   if (
     !ws ||
-    ws.readyState !==
-      WebSocket.OPEN
+    ws.readyState !== WebSocket.OPEN
   ) {
-
     console.log(
       "Cannot send audio: WebSocket closed."
     );
@@ -864,35 +616,26 @@ function sendAudioToExotel(
   }
 
   /*
+   * Deepgram gives:
+   *
    * 8000 Hz
    * 16-bit
    * mono
    *
-   * 20 ms =
-   * 160 samples
-   *
-   * 160 * 2 =
-   * 320 bytes
+   * 20 ms = 320 bytes
    */
 
-  const CHUNK_SIZE =
-    320;
+  const CHUNK_SIZE = 320;
 
-  let sequenceNumber =
-    1;
-
-  let chunkNumber =
-    0;
-
-  let timestamp =
-    0;
+  let sequenceNumber = 1;
+  let chunkNumber = 0;
+  let timestamp = 0;
 
   for (
     let offset = 0;
     offset < pcmBuffer.length;
     offset += CHUNK_SIZE
   ) {
-
     const chunk =
       pcmBuffer.subarray(
         offset,
@@ -902,36 +645,31 @@ function sendAudioToExotel(
         )
       );
 
+    if (
+      ws.readyState !== WebSocket.OPEN
+    ) {
+      break;
+    }
+
     ws.send(
       JSON.stringify({
-
-        event:
-          "media",
+        event: "media",
 
         sequence_number:
-          String(
-            sequenceNumber
-          ),
+          String(sequenceNumber),
 
         stream_sid:
           streamSid,
 
         media: {
-
           chunk:
-            String(
-              chunkNumber
-            ),
+            String(chunkNumber),
 
           timestamp:
-            String(
-              timestamp
-            ),
+            String(timestamp),
 
           payload:
-            chunk.toString(
-              "base64"
-            )
+            chunk.toString("base64")
         }
       })
     );
@@ -947,26 +685,23 @@ function sendAudioToExotel(
     "audio chunks to Exotel."
   );
 
-  // ----------------------------------------------
-  // MARK RESPONSE COMPLETE
-  // ----------------------------------------------
+  if (
+    ws.readyState === WebSocket.OPEN
+  ) {
+    ws.send(
+      JSON.stringify({
+        event: "mark",
 
-  ws.send(
-    JSON.stringify({
+        stream_sid:
+          streamSid,
 
-      event:
-        "mark",
-
-      stream_sid:
-        streamSid,
-
-      mark: {
-
-        name:
-          "ai_response_complete"
-      }
-    })
-  );
+        mark: {
+          name:
+            "ai_response_complete"
+        }
+      })
+    );
+  }
 }
 
 // ==================================================
@@ -978,28 +713,16 @@ async function processQuestion(
   streamSid,
   audioBuffer
 ) {
-
   try {
-
     console.log("");
-    console.log(
-      "################################"
-    );
-    console.log(
-      "PROCESSING CALLER QUESTION"
-    );
-    console.log(
-      "################################"
-    );
-
-    const startTime =
-      Date.now();
+    console.log("################################");
+    console.log("PROCESSING CALLER QUESTION");
+    console.log("################################");
 
     if (
       !audioBuffer ||
       audioBuffer.length < 4000
     ) {
-
       console.log(
         "Audio too short."
       );
@@ -1007,9 +730,9 @@ async function processQuestion(
       return;
     }
 
-    // ==============================================
-    // STT
-    // ==============================================
+    // ==================================================
+    // 1. STT
+    // ==================================================
 
     const question =
       await transcribeAudio(
@@ -1017,7 +740,6 @@ async function processQuestion(
       );
 
     if (!question) {
-
       console.log(
         "No speech detected."
       );
@@ -1030,52 +752,32 @@ async function processQuestion(
       question
     );
 
-    // ==============================================
-    // DETERMINE WHETHER WEB SEARCH IS NEEDED
-    // ==============================================
+    // ==================================================
+    // 2. LIVE WEB SEARCH ONLY WHEN NEEDED
+    // ==================================================
 
-    const live =
-      needsLiveSearch(
-        question
+    let webContext = "";
+
+    if (
+      needsLiveWeb(question)
+    ) {
+      console.log(
+        "Live information requested."
       );
 
-    console.log(
-      "LIVE SEARCH:",
-      live
-    );
-
-    // ==============================================
-    // TAVILY
-    // ==============================================
-
-    let webContext =
-      null;
-
-    if (live) {
-
-      try {
-
-        webContext =
-          await searchWeb(
-            question
-          );
-
-      } catch (error) {
-
-        console.error(
-          "Tavily search failed:",
-          error.message
+      webContext =
+        await searchWeb(
+          question
         );
-
-        // Do NOT kill the call.
-        webContext =
-          null;
-      }
+    } else {
+      console.log(
+        "No live web search needed."
+      );
     }
 
-    // ==============================================
-    // GROQ
-    // ==============================================
+    // ==================================================
+    // 3. LLM
+    // ==================================================
 
     const answer =
       await askGroq(
@@ -1083,18 +785,23 @@ async function processQuestion(
         webContext
       );
 
-    // ==============================================
-    // TTS
-    // ==============================================
+    console.log(
+      "FINAL ANSWER:",
+      answer
+    );
+
+    // ==================================================
+    // 4. TTS
+    // ==================================================
 
     const speech =
       await synthesizeSpeech(
         answer
       );
 
-    // ==============================================
-    // EXOTEL
-    // ==============================================
+    // ==================================================
+    // 5. SEND TO EXOTEL
+    // ==================================================
 
     sendAudioToExotel(
       ws,
@@ -1102,53 +809,23 @@ async function processQuestion(
       speech
     );
 
-    const totalTime =
-      Date.now() -
-      startTime;
-
-    console.log("");
-    console.log(
-      "================================"
-    );
-
     console.log(
       "ANSWER SENT TO CALLER"
     );
 
-    console.log(
-      "Total processing time:",
-      totalTime,
-      "ms"
-    );
-
-    console.log(
-      "================================"
-    );
-
   } catch (error) {
-
     console.log("");
-    console.log(
-      "################################"
-    );
-
-    console.log(
-      "VOICE PROCESSING ERROR"
-    );
-
-    console.log(
-      "################################"
-    );
+    console.log("################################");
+    console.log("VOICE PROCESSING ERROR");
+    console.log("################################");
 
     console.error(
       error
     );
 
-    // ----------------------------------------------
-    // IMPORTANT:
-    // Never let one failed question
-    // crash the Render server.
-    // ----------------------------------------------
+    /*
+     * Do not crash Render.
+     */
   }
 }
 
@@ -1159,84 +836,51 @@ async function processQuestion(
 wss.on(
   "connection",
   (ws) => {
-
     console.log("");
-    console.log(
-      "================================"
-    );
+    console.log("================================");
+    console.log("EXOTEL WEBSOCKET CONNECTED");
+    console.log("================================");
 
-    console.log(
-      "EXOTEL WEBSOCKET CONNECTED"
-    );
+    let streamSid = null;
+    let callSid = null;
 
-    console.log(
-      "================================"
-    );
+    let audioChunks = [];
 
-    let streamSid =
-      null;
-
-    let callSid =
-      null;
-
-    let audioChunks =
-      [];
-
-    let speechStarted =
-      false;
-
-    let silenceFrames =
-      0;
-
-    let processing =
-      false;
+    let speechStarted = false;
+    let silenceFrames = 0;
+    let processing = false;
 
     /*
-     * Exotel frames are approximately
-     * 20 ms in your current setup.
+     * Exotel audio frames are normally
+     * approximately 20ms.
      *
-     * 20 frames = ~400 ms silence.
-     *
-     * This is faster than the old
-     * 35-frame / ~700 ms setting.
+     * 25 frames = ~500ms silence.
      */
 
-    const SILENCE_FRAME_LIMIT =
-      20;
+    const SILENCE_FRAME_LIMIT = 25;
 
     /*
-     * Caller speech threshold.
-     *
-     * If your calls accidentally
-     * cut off quiet speech,
-     * lower this to 250.
+     * Adjust this if speech detection
+     * is too sensitive or not sensitive enough.
      */
 
-    const SPEECH_THRESHOLD =
-      350;
+    const SPEECH_THRESHOLD = 350;
 
-    // ==============================================
-    // RESET
-    // ==============================================
+    // ==================================================
+    // RESET SPEECH
+    // ==================================================
 
     function resetSpeech() {
-
-      audioChunks =
-        [];
-
-      speechStarted =
-        false;
-
-      silenceFrames =
-        0;
+      audioChunks = [];
+      speechStarted = false;
+      silenceFrames = 0;
     }
 
-    // ==============================================
+    // ==================================================
     // FINISH SPEECH
-    // ==============================================
+    // ==================================================
 
     async function finishSpeech() {
-
       if (processing) {
         return;
       }
@@ -1244,14 +888,11 @@ wss.on(
       if (
         audioChunks.length === 0
       ) {
-
         resetSpeech();
-
         return;
       }
 
-      processing =
-        true;
+      processing = true;
 
       const fullAudio =
         Buffer.concat(
@@ -1259,51 +900,36 @@ wss.on(
         );
 
       console.log("");
-      console.log(
-        "================================"
-      );
-
-      console.log(
-        "END OF SPEECH"
-      );
-
+      console.log("================================");
+      console.log("END OF SPEECH");
       console.log(
         "Audio:",
         fullAudio.length,
         "bytes"
       );
-
-      console.log(
-        "================================"
-      );
+      console.log("================================");
 
       resetSpeech();
 
       try {
-
         await processQuestion(
           ws,
           streamSid,
           fullAudio
         );
-
       } finally {
-
-        processing =
-          false;
+        processing = false;
       }
     }
 
-    // ==============================================
-    // MESSAGE
-    // ==============================================
+    // ==================================================
+    // WEBSOCKET MESSAGE
+    // ==================================================
 
     ws.on(
       "message",
       async (data) => {
-
         try {
-
           const message =
             JSON.parse(
               data.toString()
@@ -1317,15 +943,13 @@ wss.on(
             event
           );
 
-          // ========================================
+          // ============================================
           // CONNECTED
-          // ========================================
+          // ============================================
 
           if (
-            event ===
-            "connected"
+            event === "connected"
           ) {
-
             console.log(
               "Exotel WebSocket connected."
             );
@@ -1333,15 +957,13 @@ wss.on(
             return;
           }
 
-          // ========================================
+          // ============================================
           // START
-          // ========================================
+          // ============================================
 
           if (
-            event ===
-            "start"
+            event === "start"
           ) {
-
             streamSid =
               message.stream_sid ||
               message.start?.stream_sid ||
@@ -1373,19 +995,16 @@ wss.on(
             return;
           }
 
-          // ========================================
+          // ============================================
           // MEDIA
-          // ========================================
+          // ============================================
 
           if (
-            event ===
-            "media"
+            event === "media"
           ) {
-
             if (
               !message.media?.payload
             ) {
-
               return;
             }
 
@@ -1407,38 +1026,32 @@ wss.on(
               Math.round(level)
             );
 
-            // --------------------------------------
-            // DON'T LISTEN WHILE PROCESSING
-            // --------------------------------------
+            /*
+             * Do not collect audio while the AI
+             * is processing the previous question.
+             */
 
             if (processing) {
-
               return;
             }
 
-            // --------------------------------------
-            // SPEECH START
-            // --------------------------------------
+            // ==========================================
+            // SPEECH START / CONTINUATION
+            // ==========================================
 
             if (
               level >
               SPEECH_THRESHOLD
             ) {
-
-              if (
-                !speechStarted
-              ) {
-
+              if (!speechStarted) {
                 console.log(
                   ">>> SPEECH STARTED"
                 );
 
-                speechStarted =
-                  true;
+                speechStarted = true;
               }
 
-              silenceFrames =
-                0;
+              silenceFrames = 0;
 
               audioChunks.push(
                 audio
@@ -1447,14 +1060,13 @@ wss.on(
               return;
             }
 
-            // --------------------------------------
-            // SPEECH CONTINUATION
-            // --------------------------------------
+            // ==========================================
+            // SILENCE AFTER SPEECH
+            // ==========================================
 
             if (
               speechStarted
             ) {
-
               audioChunks.push(
                 audio
               );
@@ -1472,7 +1084,6 @@ wss.on(
                 silenceFrames >=
                 SILENCE_FRAME_LIMIT
               ) {
-
                 await finishSpeech();
               }
             }
@@ -1480,15 +1091,13 @@ wss.on(
             return;
           }
 
-          // ========================================
+          // ============================================
           // DTMF
-          // ========================================
+          // ============================================
 
           if (
-            event ===
-            "dtmf"
+            event === "dtmf"
           ) {
-
             console.log(
               "DTMF:",
               message.dtmf?.digit
@@ -1497,15 +1106,13 @@ wss.on(
             return;
           }
 
-          // ========================================
+          // ============================================
           // MARK
-          // ========================================
+          // ============================================
 
           if (
-            event ===
-            "mark"
+            event === "mark"
           ) {
-
             console.log(
               "Exotel mark:",
               message.mark?.name
@@ -1514,15 +1121,13 @@ wss.on(
             return;
           }
 
-          // ========================================
+          // ============================================
           // CLEAR
-          // ========================================
+          // ============================================
 
           if (
-            event ===
-            "clear"
+            event === "clear"
           ) {
-
             console.log(
               "Exotel CLEAR received."
             );
@@ -1532,15 +1137,13 @@ wss.on(
             return;
           }
 
-          // ========================================
+          // ============================================
           // STOP
-          // ========================================
+          // ============================================
 
           if (
-            event ===
-            "stop"
+            event === "stop"
           ) {
-
             console.log(
               "Stream stopped."
             );
@@ -1551,7 +1154,6 @@ wss.on(
           }
 
         } catch (error) {
-
           console.log(
             "Message parsing error:",
             error.message
@@ -1560,28 +1162,26 @@ wss.on(
       }
     );
 
-    // ==============================================
+    // ==================================================
     // CLOSE
-    // ==============================================
+    // ==================================================
 
     ws.on(
       "close",
       () => {
-
         console.log(
           "Exotel WebSocket disconnected."
         );
       }
     );
 
-    // ==============================================
+    // ==================================================
     // ERROR
-    // ==============================================
+    // ==================================================
 
     ws.on(
       "error",
       (error) => {
-
         console.log(
           "WebSocket error:",
           error.message
@@ -1592,26 +1192,17 @@ wss.on(
 );
 
 // ==================================================
-// START SERVER
+// SERVER START
 // ==================================================
 
 server.listen(
   PORT,
   "0.0.0.0",
   () => {
-
     console.log("");
-    console.log(
-      "--------------------------------"
-    );
-
-    console.log(
-      "AI VOICE BRIDGE"
-    );
-
-    console.log(
-      "--------------------------------"
-    );
+    console.log("--------------------------------");
+    console.log("AI VOICE BRIDGE");
+    console.log("--------------------------------");
 
     console.log(
       "HTTP:",
@@ -1629,13 +1220,8 @@ server.listen(
     );
 
     console.log("");
-
     console.log(
       "Groq LLM: openai/gpt-oss-20b"
-    );
-
-    console.log(
-      "Groq fallback: llama-3.1-8b-instant"
     );
 
     console.log(
@@ -1643,14 +1229,10 @@ server.listen(
     );
 
     console.log(
-      "Tavily:",
-      TAVILY_API_KEY
-        ? "LIVE WEB ENABLED"
-        : "DISABLED"
+      "Tavily: live web search"
     );
 
     console.log("");
-
     console.log(
       "Waiting for Exotel..."
     );
@@ -1658,4 +1240,3 @@ server.listen(
     console.log("");
   }
 );
-```
