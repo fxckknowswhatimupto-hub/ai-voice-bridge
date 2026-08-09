@@ -23,7 +23,7 @@ const DEEPGRAM_STT_MODEL =
 const DEEPGRAM_TTS_MODEL =
   "aura-2-thalia-en";
 
-// Tavily should never hold the phone call for too long.
+// Tavily should never hold the phone call too long.
 const TAVILY_TIMEOUT_MS = 1500;
 
 // Groq safety timeout.
@@ -36,7 +36,7 @@ const GROQ_TIMEOUT_MS = 10000;
 const SAMPLE_RATE = 8000;
 const BYTES_PER_SAMPLE = 2;
 
-// 20ms @ 8kHz, 16-bit, mono.
+// 20 ms @ 8 kHz, 16-bit, mono.
 const EXOTEL_AUDIO_CHUNK_SIZE =
   160 * BYTES_PER_SAMPLE;
 
@@ -610,7 +610,8 @@ function closeDeepgramSocket(
 
       socket.send(
         JSON.stringify({
-          type: "Close"
+          type:
+            "Close"
         })
       );
     }
@@ -980,6 +981,54 @@ function flushTTS(
 }
 
 // ==================================================
+// WAIT FOR AUDIO TO FINISH
+// ==================================================
+
+function waitForAudioDrain(
+  call
+) {
+
+  if (
+    call.destroyed
+  ) {
+
+    return;
+  }
+
+  if (
+    !call.audioSender.hasPendingAudio()
+  ) {
+
+    call.aiSpeaking =
+      false;
+
+    call.ttsFlushPending =
+      false;
+
+    sendExotelMark(
+      call
+    );
+
+    console.log(
+      `[${call.id}] 🔊 AUDIO FINISHED`
+    );
+
+    return;
+  }
+
+  setTimeout(
+    () => {
+
+      waitForAudioDrain(
+        call
+      );
+
+    },
+    40
+  );
+}
+
+// ==================================================
 // INTERRUPT AI
 // ==================================================
 
@@ -997,7 +1046,8 @@ function interruptAI(
   }
 
   if (
-    !call.aiSpeaking
+    !call.aiSpeaking &&
+    !call.aiGenerating
   ) {
 
     return;
@@ -1008,17 +1058,23 @@ function interruptAI(
     reason
   );
 
-  // Mark the current response as invalid.
+  // ==================================================
+  // INVALIDATE OLD RESPONSE
+  // ==================================================
+
   call.ttsGeneration++;
+
+  call.aiGenerating =
+    false;
 
   call.aiSpeaking =
     false;
 
-  call.interrupting =
-    true;
+  call.ttsFlushPending =
+    false;
 
   // ==================================================
-  // CLEAR LOCAL AUDIO
+  // CLEAR LOCAL AUDIO QUEUE
   // ==================================================
 
   if (
@@ -1029,7 +1085,7 @@ function interruptAI(
   }
 
   // ==================================================
-  // CLEAR EXOTEL AUDIO
+  // CLEAR EXOTEL BUFFER
   // ==================================================
 
   if (
@@ -1065,7 +1121,7 @@ function interruptAI(
   }
 
   // ==================================================
-  // FLUSH DEEPGRAM TTS
+  // FLUSH TTS
   // ==================================================
 
   if (
@@ -1086,45 +1142,8 @@ function interruptAI(
     } catch (_) {}
   }
 
-  call.interrupting =
-    false;
-}
-
-// ==================================================
-// WAIT FOR AUDIO TO FINISH
-// ==================================================
-
-function waitForAudioDrain(
-  call
-) {
-
-  if (
-    call.destroyed
-  ) {
-
-    return;
-  }
-
-  if (
-    !call.audioSender.hasPendingAudio()
-  ) {
-
-    sendExotelMark(
-      call
-    );
-
-    return;
-  }
-
-  setTimeout(
-    () => {
-
-      waitForAudioDrain(
-        call
-      );
-
-    },
-    40
+  console.log(
+    `[${call.id}] 🟢 READY FOR NEW QUESTION`
   );
 }
 
@@ -1155,7 +1174,9 @@ async function streamGroq(
         "For simple questions, answer briefly. " +
         "For larger questions, give the useful information without unnecessary filler. " +
         "Remember the conversation during this phone call. " +
-        "Understand follow-up questions naturally."
+        "Understand follow-up questions naturally. " +
+        "Do not repeat the user's question. " +
+        "Do not use unnecessary introductions."
     }
   ];
 
@@ -1169,6 +1190,7 @@ async function streamGroq(
   ) {
 
     messages.push({
+
       role:
         item.role,
 
@@ -1265,8 +1287,7 @@ async function streamGroq(
     ) {
 
       // ==================================================
-      // IMPORTANT:
-      // STOP PROCESSING OLD GROQ RESPONSE AFTER BARGE-IN
+      // STOP OLD RESPONSE AFTER INTERRUPT
       // ==================================================
 
       if (
@@ -1276,7 +1297,7 @@ async function streamGroq(
       ) {
 
         console.log(
-          `[${call.id}] Old Groq stream discarded`
+          `[${call.id}] OLD GROQ STREAM DISCARDED`
         );
 
         break;
@@ -1473,11 +1494,20 @@ async function processQuestion(
   const ttsGeneration =
     ++call.ttsGeneration;
 
-  call.aiSpeaking =
+  call.activeTTSGeneration =
+    ttsGeneration;
+
+  call.aiGenerating =
     true;
 
-  call.interrupting =
+  call.aiSpeaking =
     false;
+
+  call.ttsFlushPending =
+    false;
+
+  // Remove old queued audio.
+  call.audioSender.clear();
 
   let sentTTS =
     false;
@@ -1529,7 +1559,9 @@ async function processQuestion(
     }
 
     if (
-      call.destroyed
+      call.destroyed ||
+      call.ttsGeneration !==
+        ttsGeneration
     ) {
 
       return;
@@ -1550,7 +1582,6 @@ async function processQuestion(
           return;
         }
 
-        // Old response?
         if (
           call.ttsGeneration !==
           ttsGeneration
@@ -1572,6 +1603,7 @@ async function processQuestion(
           sentTTS =
             true;
 
+          // TTS has now started.
           call.aiSpeaking =
             true;
         }
@@ -1591,7 +1623,7 @@ async function processQuestion(
       );
 
     // ==================================================
-    // RESPONSE WAS INTERRUPTED
+    // OLD RESPONSE?
     // ==================================================
 
     if (
@@ -1614,7 +1646,14 @@ async function processQuestion(
     }
 
     // ==================================================
-    // FLUSH TTS
+    // GROQ FINISHED
+    // ==================================================
+
+    call.aiGenerating =
+      false;
+
+    // ==================================================
+    // FLUSH DEEPGRAM TTS
     // ==================================================
 
     if (
@@ -1624,9 +1663,17 @@ async function processQuestion(
         ttsGeneration
     ) {
 
+      call.ttsFlushPending =
+        true;
+
       flushTTS(
         call
       );
+
+    } else {
+
+      call.aiSpeaking =
+        false;
     }
 
     // ==================================================
@@ -1657,6 +1704,7 @@ async function processQuestion(
           answer
       });
 
+      // Keep latest 5 exchanges.
       if (
         call.conversationHistory.length >
         10
@@ -1683,8 +1731,10 @@ async function processQuestion(
 
   } catch (error) {
 
-    // If caller interrupted, don't play
-    // an error message.
+    // ==================================================
+    // INTERRUPTED RESPONSE
+    // ==================================================
+
     if (
       call.ttsGeneration !==
       ttsGeneration
@@ -1705,29 +1755,32 @@ async function processQuestion(
       error.message
     );
 
+    call.aiGenerating =
+      false;
+
     try {
 
-      sendTextToTTS(
-        call,
-        "Sorry, I had trouble answering that."
-      );
+      const sent =
+        sendTextToTTS(
+          call,
+          "Sorry, I had trouble answering that."
+        );
 
-      flushTTS(
-        call
-      );
+      if (sent) {
+
+        call.aiSpeaking =
+          true;
+
+        call.ttsFlushPending =
+          true;
+
+        flushTTS(
+          call
+        );
+      }
 
     } catch (_) {}
 
-  } finally {
-
-    if (
-      call.ttsGeneration ===
-      ttsGeneration
-    ) {
-
-      call.aiSpeaking =
-        false;
-    }
   }
 }
 
@@ -1764,7 +1817,8 @@ function enqueueQuestion(
   // ==================================================
 
   if (
-    call.aiSpeaking
+    call.aiSpeaking ||
+    call.aiGenerating
   ) {
 
     interruptAI(
@@ -1772,7 +1826,6 @@ function enqueueQuestion(
       "caller started speaking"
     );
 
-    // Remove stale questions.
     call.questionQueue =
       [];
   }
@@ -1896,8 +1949,11 @@ function createCallSession(
       null,
 
     // ==================================================
-    // BARGE-IN STATE
+    // AI STATE
     // ==================================================
+
+    aiGenerating:
+      false,
 
     aiSpeaking:
       false,
@@ -1905,8 +1961,16 @@ function createCallSession(
     interrupting:
       false,
 
+    // Generation used to invalidate
+    // old Groq/TTS responses.
     ttsGeneration:
       0,
+
+    activeTTSGeneration:
+      0,
+
+    ttsFlushPending:
+      false,
 
     lastSpeechTime:
       0
@@ -1938,6 +2002,9 @@ function destroyCall(
 
   call.destroyed =
     true;
+
+  call.aiGenerating =
+    false;
 
   call.aiSpeaking =
     false;
@@ -2098,8 +2165,8 @@ async function setupDeepgram(
             // ==================================================
 
             if (
-              call.aiSpeaking &&
-              transcript.trim().length >= 2
+              call.aiSpeaking ||
+              call.aiGenerating
             ) {
 
               const lower =
@@ -2107,33 +2174,38 @@ async function setupDeepgram(
                   .toLowerCase()
                   .trim();
 
-              console.log(
-                `[${call.id}] 🎤 SPEECH DURING AI:`,
-                lower
-              );
-
-              // Explicit interruption commands.
-              const explicitInterrupt =
-                /^(stop|wait|hold on|hang on|no|no wait|shut up|be quiet|that's enough|enough|pause)\b/i
-                  .test(
-                    lower
-                  );
-
-              // Natural barge-in.
-              const naturalBargeIn =
-                lower.length >= 3;
-
               if (
-                explicitInterrupt ||
-                naturalBargeIn
+                lower.length >= 2
               ) {
 
-                interruptAI(
-                  call,
-                  explicitInterrupt
-                    ? "explicit command"
-                    : "caller started speaking"
+                console.log(
+                  `[${call.id}] 🎤 SPEECH DURING AI:`,
+                  lower
                 );
+
+                // Explicit commands.
+                const explicitInterrupt =
+                  /^(stop|wait|hold on|hang on|no|no wait|shut up|be quiet|that's enough|enough|pause|cancel|stop talking)\b/i
+                    .test(
+                      lower
+                    );
+
+                // Natural barge-in.
+                const naturalBargeIn =
+                  lower.length >= 3;
+
+                if (
+                  explicitInterrupt ||
+                  naturalBargeIn
+                ) {
+
+                  interruptAI(
+                    call,
+                    explicitInterrupt
+                      ? "explicit command"
+                      : "caller started speaking"
+                  );
+                }
               }
             }
 
@@ -2228,14 +2300,27 @@ async function setupDeepgram(
                 data
               );
 
+            // ==================================================
+            // IMPORTANT FIX
+            //
+            // Do NOT use aiSpeaking as the gate.
+            //
+            // Groq may have finished while Deepgram
+            // is still producing audio.
+            // ==================================================
+
             if (
               audio.length > 0 &&
-              call.aiSpeaking
+              call.ttsGeneration ===
+                call.activeTTSGeneration
             ) {
 
               call.audioSender.enqueue(
                 audio
               );
+
+              call.aiSpeaking =
+                true;
             }
 
             return;
@@ -2259,15 +2344,35 @@ async function setupDeepgram(
             return;
           }
 
+          // ==================================================
+          // DEEPGRAM FINISHED GENERATING AUDIO
+          // ==================================================
+
           if (
             message.type ===
             "Flushed"
           ) {
 
-            waitForAudioDrain(
-              call
-            );
+            if (
+              call.ttsGeneration ===
+              call.activeTTSGeneration
+            ) {
+
+              console.log(
+                `[${call.id}] 🔊 DEEPGRAM TTS FLUSHED`
+              );
+
+              waitForAudioDrain(
+                call
+              );
+            }
+
+            return;
           }
+
+          // ==================================================
+          // TTS WARNING
+          // ==================================================
 
           if (
             message.type ===
