@@ -1,4 +1,3 @@
-```javascript
 const http = require("http");
 const WebSocket = require("ws");
 const Groq = require("groq-sdk");
@@ -19,8 +18,15 @@ const WS_URL =
 // ENVIRONMENT VARIABLES
 // ==================================================
 
-const GROQ_API_KEY = process.env.GROQ_API_KEY;
-const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
+const GROQ_API_KEY =
+  process.env.GROQ_API_KEY;
+
+const DEEPGRAM_API_KEY =
+  process.env.DEEPGRAM_API_KEY;
+
+// ==================================================
+// ENVIRONMENT CHECK
+// ==================================================
 
 if (!GROQ_API_KEY) {
   throw new Error("GROQ_API_KEY is missing");
@@ -42,10 +48,39 @@ const groq = new Groq({
 // HTTP SERVER
 // ==================================================
 
-const server = http.createServer(async (req, res) => {
-  console.log("HTTP:", req.method, req.url);
+const server = http.createServer(
+  async (req, res) => {
 
-  if (req.url === "/health") {
+    console.log(
+      "HTTP request:",
+      req.method,
+      req.url
+    );
+
+    // ----------------------------------------------
+    // HEALTH
+    // ----------------------------------------------
+
+    if (req.url === "/health") {
+
+      res.writeHead(200, {
+        "Content-Type": "application/json"
+      });
+
+      res.end(
+        JSON.stringify({
+          status: "ok",
+          service: "ai-voice-bridge"
+        })
+      );
+
+      return;
+    }
+
+    // ----------------------------------------------
+    // DEFAULT
+    // ----------------------------------------------
+
     res.writeHead(200, {
       "Content-Type": "application/json"
     });
@@ -53,50 +88,51 @@ const server = http.createServer(async (req, res) => {
     res.end(
       JSON.stringify({
         status: "ok",
-        service: "ai-voice-bridge"
+        websocket: WS_URL
       })
     );
-
-    return;
   }
+);
 
-  res.writeHead(200, {
-    "Content-Type": "application/json"
+// ==================================================
+// WEBSOCKET SERVER
+// ==================================================
+
+const wss =
+  new WebSocket.Server({
+    server
   });
-
-  res.end(
-    JSON.stringify({
-      status: "ok",
-      websocket: WS_URL
-    })
-  );
-});
-
-// ==================================================
-// WEBSOCKET
-// ==================================================
-
-const wss = new WebSocket.Server({
-  server
-});
 
 // ==================================================
 // AUDIO LEVEL
 // ==================================================
 
 function getAudioLevel(buffer) {
-  if (!buffer || buffer.length < 2) {
+
+  if (
+    !buffer ||
+    buffer.length < 2
+  ) {
     return 0;
   }
 
   let total = 0;
 
   const samples =
-    Math.floor(buffer.length / 2);
+    Math.floor(
+      buffer.length / 2
+    );
 
-  for (let i = 0; i < samples; i++) {
+  for (
+    let i = 0;
+    i < samples;
+    i++
+  ) {
+
     total += Math.abs(
-      buffer.readInt16LE(i * 2)
+      buffer.readInt16LE(
+        i * 2
+      )
     );
   }
 
@@ -107,8 +143,20 @@ function getAudioLevel(buffer) {
 // DEEPGRAM STT
 // ==================================================
 
-async function transcribeAudio(pcmBuffer) {
-  console.log("🎤 Deepgram STT...");
+async function transcribeAudio(
+  pcmBuffer
+) {
+
+  console.log("");
+  console.log(
+    "================================"
+  );
+  console.log(
+    "DEEPGRAM SPEECH TO TEXT"
+  );
+  console.log(
+    "================================"
+  );
 
   const url =
     "https://api.deepgram.com/v1/listen" +
@@ -118,29 +166,35 @@ async function transcribeAudio(pcmBuffer) {
     "&sample_rate=8000" +
     "&channels=1";
 
-  const response = await fetch(
-    url,
-    {
-      method: "POST",
+  const response =
+    await fetch(
+      url,
+      {
+        method: "POST",
 
-      headers: {
-        Authorization:
-          `Token ${DEEPGRAM_API_KEY}`,
+        headers: {
+          "Authorization":
+            "Token " +
+            DEEPGRAM_API_KEY,
 
-        "Content-Type":
-          "audio/raw"
-      },
+          "Content-Type":
+            "audio/raw"
+        },
 
-      body: pcmBuffer
-    }
-  );
+        body: pcmBuffer
+      }
+    );
 
   if (!response.ok) {
+
     const errorText =
       await response.text();
 
     throw new Error(
-      `Deepgram STT ${response.status}: ${errorText}`
+      "Deepgram STT " +
+      response.status +
+      ": " +
+      errorText
     );
   }
 
@@ -148,18 +202,17 @@ async function transcribeAudio(pcmBuffer) {
     await response.json();
 
   const transcript =
-    data?.results
-      ?.channels?.[0]
+    data?.results?.channels?.[0]
       ?.alternatives?.[0]
       ?.transcript || "";
 
   const text =
-    transcript
+    String(transcript)
       .replace(/\s+/g, " ")
       .trim();
 
   console.log(
-    "🎤 Caller:",
+    "TRANSCRIPTION:",
     text
   );
 
@@ -167,11 +220,23 @@ async function transcribeAudio(pcmBuffer) {
 }
 
 // ==================================================
-// GROQ + OPTIONAL LIVE WEB SEARCH
+// GROQ LLM
 // ==================================================
 
-async function askGroq(question) {
-  console.log("🧠 Groq GPT-OSS 20B...");
+async function askGroq(
+  question
+) {
+
+  console.log("");
+  console.log(
+    "================================"
+  );
+  console.log(
+    "GROQ GPT-OSS 20B"
+  );
+  console.log(
+    "================================"
+  );
 
   const completion =
     await groq.chat.completions.create({
@@ -180,246 +245,85 @@ async function askGroq(question) {
         "openai/gpt-oss-20b",
 
       messages: [
+
         {
           role: "system",
 
           content:
             "You are a fast, helpful phone voice assistant. " +
-            "Speak naturally. " +
-            "Keep answers short and easy to understand over a phone call. " +
-            "Normally answer directly. " +
-            "If the user asks for current, latest, recent, today's, " +
-            "live, real-time, breaking, current price, current weather, " +
-            "current news, current sports scores, current schedules, " +
-            "or other information that may have changed recently, " +
-            "use browser search before answering. " +
-            "Never pretend you know current information if it requires web search. " +
-            "Do not use markdown, bullet points, emojis, URLs, or citations " +
-            "in the spoken answer. " +
-            "Keep the final spoken answer concise."
+            "Speak naturally and conversationally. " +
+            "Keep answers short and direct because the answer will be spoken over a phone call. " +
+            "Do not use markdown, bullet points, emojis, or long explanations. " +
+            "When you do not have live information available, say so instead of pretending that you do."
         },
 
         {
           role: "user",
 
-          content: question
+          content:
+            question
         }
+
       ],
 
-      // Lower reasoning = lower latency
-      reasoning_effort: "low",
+      temperature: 0.3,
 
-      temperature: 0.2,
-
-      max_completion_tokens: 180,
-
-      // Give GPT-OSS access to live web information.
-      // It can decide when browser search is needed.
-      tools: [
-        {
-          type: "browser_search"
-        }
-      ],
-
-      tool_choice: "auto"
+      max_tokens: 180
     });
 
-  let answer =
+  const answer =
     completion
       ?.choices?.[0]
       ?.message?.content || "";
 
-  answer =
+  const text =
     String(answer)
       .replace(/\s+/g, " ")
       .trim();
 
-  if (!answer) {
+  if (!text) {
+
     throw new Error(
       "Groq returned an empty answer"
     );
   }
 
-  // Remove common citation formats that could
-  // accidentally be spoken by the TTS system.
-
-  answer =
-    answer
-      .replace(/\[\d+\]/g, "")
-      .replace(/【[^】]+】/g, "")
-      .replace(/\([^)]*https?:\/\/[^)]*\)/gi, "")
-      .replace(/https?:\/\/\S+/gi, "")
-      .replace(/\s+/g, " ")
-      .trim();
-
-  // Phone answers should stay short.
-  answer =
-    answer.slice(0, 700);
-
   console.log(
-    "🧠 AI:",
-    answer
+    "AI ANSWER:",
+    text
   );
 
-  return answer;
+  return text;
 }
 
 // ==================================================
-// EXOTEL AUDIO SENDER
+// DEEPGRAM TTS
 // ==================================================
 
-function createExotelAudioSender(
-  ws,
-  streamSid
-) {
-  const CHUNK_SIZE = 320;
-
-  let pending =
-    Buffer.alloc(0);
-
-  let sequenceNumber = 1;
-  let chunkNumber = 0;
-  let timestamp = 0;
-
-  function sendChunk(chunk) {
-    if (
-      !ws ||
-      ws.readyState !==
-        WebSocket.OPEN
-    ) {
-      return;
-    }
-
-    ws.send(
-      JSON.stringify({
-        event: "media",
-
-        sequence_number:
-          String(sequenceNumber),
-
-        stream_sid:
-          streamSid,
-
-        media: {
-          chunk:
-            String(chunkNumber),
-
-          timestamp:
-            String(timestamp),
-
-          payload:
-            chunk.toString("base64")
-        }
-      })
-    );
-
-    sequenceNumber++;
-    chunkNumber++;
-    timestamp += 20;
-  }
-
-  function push(data) {
-    if (!data || data.length === 0) {
-      return;
-    }
-
-    pending =
-      Buffer.concat([
-        pending,
-        data
-      ]);
-
-    while (
-      pending.length >=
-      CHUNK_SIZE
-    ) {
-      const chunk =
-        pending.subarray(
-          0,
-          CHUNK_SIZE
-        );
-
-      pending =
-        pending.subarray(
-          CHUNK_SIZE
-        );
-
-      sendChunk(chunk);
-    }
-  }
-
-  function finish() {
-    if (
-      pending.length > 0
-    ) {
-      const padded =
-        Buffer.alloc(
-          CHUNK_SIZE
-        );
-
-      pending.copy(
-        padded
-      );
-
-      sendChunk(
-        padded
-      );
-
-      pending =
-        Buffer.alloc(0);
-    }
-
-    if (
-      ws &&
-      ws.readyState ===
-        WebSocket.OPEN
-    ) {
-      ws.send(
-        JSON.stringify({
-          event: "mark",
-
-          stream_sid:
-            streamSid,
-
-          mark: {
-            name:
-              "ai_response_complete"
-          }
-        })
-      );
-    }
-
-    console.log(
-      "🔊 Sent",
-      chunkNumber,
-      "audio chunks"
-    );
-  }
-
-  return {
-    push,
-    finish
-  };
-}
-
-// ==================================================
-// DEEPGRAM STREAMING TTS
-// ==================================================
-
-async function streamSpeechToExotel(
-  ws,
-  streamSid,
+async function synthesizeSpeech(
   text
 ) {
-  console.log("🔊 Deepgram TTS...");
+
+  console.log("");
+  console.log(
+    "================================"
+  );
+  console.log(
+    "DEEPGRAM TEXT TO SPEECH"
+  );
+  console.log(
+    "================================"
+  );
 
   let cleanText =
     String(text)
       .replace(/\s+/g, " ")
       .trim();
 
+  // Keep phone responses short.
+
   cleanText =
-    cleanText.slice(0, 700);
+    cleanText.slice(0, 1000);
 
   const url =
     "https://api.deepgram.com/v1/speak" +
@@ -434,88 +338,181 @@ async function streamSpeechToExotel(
         method: "POST",
 
         headers: {
-          Authorization:
-            `Token ${DEEPGRAM_API_KEY}`,
+          "Authorization":
+            "Token " +
+            DEEPGRAM_API_KEY,
 
           "Content-Type":
             "application/json"
         },
 
-        body: JSON.stringify({
-          text: cleanText
-        })
+        body:
+          JSON.stringify({
+            text: cleanText
+          })
       }
     );
 
   if (!response.ok) {
+
     const errorText =
       await response.text();
 
     throw new Error(
-      `Deepgram TTS ${response.status}: ${errorText}`
+      "Deepgram TTS " +
+      response.status +
+      ": " +
+      errorText
     );
   }
 
-  if (!response.body) {
-    throw new Error(
-      "Deepgram TTS returned no audio stream"
+  const arrayBuffer =
+    await response.arrayBuffer();
+
+  const audioBuffer =
+    Buffer.from(
+      arrayBuffer
     );
-  }
-
-  const sender =
-    createExotelAudioSender(
-      ws,
-      streamSid
-    );
-
-  const reader =
-    response.body.getReader();
-
-  let totalBytes = 0;
-
-  try {
-    while (true) {
-      const {
-        value,
-        done
-      } =
-        await reader.read();
-
-      if (done) {
-        break;
-      }
-
-      if (
-        value &&
-        value.length > 0
-      ) {
-        const chunk =
-          Buffer.from(value);
-
-        totalBytes +=
-          chunk.length;
-
-        // Send audio immediately
-        // instead of waiting for the
-        // entire TTS response.
-
-        sender.push(
-          chunk
-        );
-      }
-    }
-  } finally {
-    try {
-      reader.releaseLock();
-    } catch {}
-  }
-
-  sender.finish();
 
   console.log(
-    "🔊 TTS streamed:",
-    totalBytes,
+    "TTS audio:",
+    audioBuffer.length,
     "bytes"
+  );
+
+  return audioBuffer;
+}
+
+// ==================================================
+// SEND PCM AUDIO TO EXOTEL
+// ==================================================
+
+function sendAudioToExotel(
+  ws,
+  streamSid,
+  pcmBuffer
+) {
+
+  if (
+    !ws ||
+    ws.readyState !==
+      WebSocket.OPEN
+  ) {
+
+    console.log(
+      "Cannot send audio: WebSocket closed."
+    );
+
+    return;
+  }
+
+  /*
+   * Exotel audio:
+   *
+   * 8000 Hz
+   * 16-bit
+   * mono
+   *
+   * 20 ms =
+   * 160 samples
+   *
+   * 160 * 2 =
+   * 320 bytes
+   */
+
+  const CHUNK_SIZE = 320;
+
+  let sequenceNumber = 1;
+
+  let chunkNumber = 0;
+
+  let timestamp = 0;
+
+  for (
+    let offset = 0;
+    offset < pcmBuffer.length;
+    offset += CHUNK_SIZE
+  ) {
+
+    const chunk =
+      pcmBuffer.subarray(
+        offset,
+        Math.min(
+          offset + CHUNK_SIZE,
+          pcmBuffer.length
+        )
+      );
+
+    const message = {
+
+      event:
+        "media",
+
+      sequence_number:
+        String(
+          sequenceNumber
+        ),
+
+      stream_sid:
+        streamSid,
+
+      media: {
+
+        chunk:
+          String(
+            chunkNumber
+          ),
+
+        timestamp:
+          String(
+            timestamp
+          ),
+
+        payload:
+          chunk.toString(
+            "base64"
+          )
+      }
+    };
+
+    ws.send(
+      JSON.stringify(
+        message
+      )
+    );
+
+    sequenceNumber++;
+
+    chunkNumber++;
+
+    timestamp += 20;
+  }
+
+  console.log(
+    "Sent",
+    chunkNumber,
+    "audio chunks to Exotel."
+  );
+
+  // ----------------------------------------------
+  // MARK
+  // ----------------------------------------------
+
+  ws.send(
+    JSON.stringify({
+
+      event:
+        "mark",
+
+      stream_sid:
+        streamSid,
+
+      mark: {
+
+        name:
+          "ai_response_complete"
+      }
+    })
   );
 }
 
@@ -528,22 +525,29 @@ async function processQuestion(
   streamSid,
   audioBuffer
 ) {
+
   try {
+
     console.log("");
     console.log(
-      "================================"
+      "################################"
     );
     console.log(
-      "PROCESSING QUESTION"
+      "PROCESSING CALLER QUESTION"
     );
     console.log(
-      "================================"
+      "################################"
     );
+
+    // ----------------------------------------------
+    // AUDIO CHECK
+    // ----------------------------------------------
 
     if (
       !audioBuffer ||
-      audioBuffer.length < 6400
+      audioBuffer.length < 8000
     ) {
+
       console.log(
         "Audio too short."
       );
@@ -561,6 +565,7 @@ async function processQuestion(
       );
 
     if (!question) {
+
       console.log(
         "No speech detected."
       );
@@ -568,8 +573,13 @@ async function processQuestion(
       return;
     }
 
+    console.log(
+      "CALLER:",
+      question
+    );
+
     // ----------------------------------------------
-    // GROQ
+    // LLM
     // ----------------------------------------------
 
     const answer =
@@ -578,20 +588,30 @@ async function processQuestion(
       );
 
     // ----------------------------------------------
-    // TTS + IMMEDIATE STREAM
+    // TTS
     // ----------------------------------------------
 
-    await streamSpeechToExotel(
+    const speech =
+      await synthesizeSpeech(
+        answer
+      );
+
+    // ----------------------------------------------
+    // EXOTEL
+    // ----------------------------------------------
+
+    sendAudioToExotel(
       ws,
       streamSid,
-      answer
+      speech
     );
 
     console.log(
-      "✅ ANSWER SENT"
+      "ANSWER SENT TO CALLER"
     );
 
   } catch (error) {
+
     console.log("");
     console.log(
       "################################"
@@ -604,14 +624,13 @@ async function processQuestion(
     );
 
     console.error(
-      error?.message ||
       error
     );
   }
 }
 
 // ==================================================
-// EXOTEL CONNECTION
+// EXOTEL WEBSOCKET CONNECTION
 // ==================================================
 
 wss.on(
@@ -623,7 +642,7 @@ wss.on(
       "================================"
     );
     console.log(
-      "📞 EXOTEL CONNECTED"
+      "EXOTEL WEBSOCKET CONNECTED"
     );
     console.log(
       "================================"
@@ -635,8 +654,7 @@ wss.on(
     let callSid =
       null;
 
-    let audioChunks =
-      [];
+    let audioChunks = [];
 
     let speechStarted =
       false;
@@ -647,25 +665,34 @@ wss.on(
     let processing =
       false;
 
-    // Exotel sends 20 ms frames.
-    //
-    // 25 frames = approximately
-    // 500 ms silence.
-    //
-    // This is faster than the
-    // previous 700 ms setting.
+    /*
+     * Exotel sends approximately
+     * 20 ms audio frames.
+     */
 
     const SILENCE_FRAME_LIMIT =
-      25;
+      30;
 
-    // Caller speech threshold.
+    /*
+     * Speech threshold.
+     *
+     * If calls don't detect speech,
+     * lower this.
+     *
+     * If background noise triggers
+     * speech, raise this.
+     */
 
     const SPEECH_THRESHOLD =
       350;
 
+    // ==================================================
+    // RESET SPEECH
+    // ==================================================
+
     function resetSpeech() {
-      audioChunks =
-        [];
+
+      audioChunks = [];
 
       speechStarted =
         false;
@@ -674,7 +701,12 @@ wss.on(
         0;
     }
 
+    // ==================================================
+    // FINISH SPEECH
+    // ==================================================
+
     async function finishSpeech() {
+
       if (processing) {
         return;
       }
@@ -682,7 +714,9 @@ wss.on(
       if (
         audioChunks.length === 0
       ) {
+
         resetSpeech();
+
         return;
       }
 
@@ -694,31 +728,49 @@ wss.on(
           audioChunks
         );
 
+      console.log("");
       console.log(
-        "🛑 End of speech:",
+        "================================"
+      );
+      console.log(
+        "END OF SPEECH"
+      );
+      console.log(
+        "Audio:",
         fullAudio.length,
         "bytes"
+      );
+      console.log(
+        "================================"
       );
 
       resetSpeech();
 
       try {
+
         await processQuestion(
           ws,
           streamSid,
           fullAudio
         );
+
       } finally {
+
         processing =
           false;
       }
     }
+
+    // ==================================================
+    // WEBSOCKET MESSAGE
+    // ==================================================
 
     ws.on(
       "message",
       async (data) => {
 
         try {
+
           const message =
             JSON.parse(
               data.toString()
@@ -727,14 +779,19 @@ wss.on(
           const event =
             message.event;
 
+          console.log(
+            "Event:",
+            event
+          );
+
           // ========================================
           // CONNECTED
           // ========================================
 
           if (
-            event ===
-            "connected"
+            event === "connected"
           ) {
+
             console.log(
               "Exotel WebSocket connected."
             );
@@ -747,9 +804,9 @@ wss.on(
           // ========================================
 
           if (
-            event ===
-            "start"
+            event === "start"
           ) {
+
             streamSid =
               message.stream_sid ||
               message.start?.stream_sid ||
@@ -786,12 +843,13 @@ wss.on(
           // ========================================
 
           if (
-            event ===
-            "media"
+            event === "media"
           ) {
+
             if (
               !message.media?.payload
             ) {
+
               return;
             }
 
@@ -801,19 +859,32 @@ wss.on(
                 "base64"
               );
 
-            // Don't print every single
-            // 20 ms frame. That creates
-            // unnecessary Render log traffic.
-
             const level =
               getAudioLevel(
                 audio
               );
 
-            // Don't collect caller audio
-            // while generating the answer.
+            /*
+             * Don't spam Render logs
+             * with every frame.
+             */
+
+            if (
+              Math.random() < 0.05
+            ) {
+
+              console.log(
+                "Audio level:",
+                Math.round(level)
+              );
+            }
+
+            // --------------------------------------
+            // CURRENTLY PROCESSING
+            // --------------------------------------
 
             if (processing) {
+
               return;
             }
 
@@ -825,11 +896,13 @@ wss.on(
               level >
               SPEECH_THRESHOLD
             ) {
+
               if (
                 !speechStarted
               ) {
+
                 console.log(
-                  "🎤 SPEECH STARTED"
+                  ">>> SPEECH STARTED"
                 );
 
                 speechStarted =
@@ -853,20 +926,18 @@ wss.on(
             if (
               speechStarted
             ) {
+
               audioChunks.push(
                 audio
               );
 
               silenceFrames++;
 
-              // ------------------------------------
-              // SPEECH END
-              // ------------------------------------
-
               if (
                 silenceFrames >=
                 SILENCE_FRAME_LIMIT
               ) {
+
                 await finishSpeech();
               }
             }
@@ -879,9 +950,9 @@ wss.on(
           // ========================================
 
           if (
-            event ===
-            "dtmf"
+            event === "dtmf"
           ) {
+
             console.log(
               "DTMF:",
               message.dtmf?.digit
@@ -895,9 +966,9 @@ wss.on(
           // ========================================
 
           if (
-            event ===
-            "mark"
+            event === "mark"
           ) {
+
             console.log(
               "Exotel mark:",
               message.mark?.name
@@ -911,11 +982,11 @@ wss.on(
           // ========================================
 
           if (
-            event ===
-            "clear"
+            event === "clear"
           ) {
+
             console.log(
-              "Exotel CLEAR"
+              "Exotel CLEAR received."
             );
 
             resetSpeech();
@@ -928,11 +999,11 @@ wss.on(
           // ========================================
 
           if (
-            event ===
-            "stop"
+            event === "stop"
           ) {
+
             console.log(
-              "Exotel stream stopped."
+              "Stream stopped."
             );
 
             resetSpeech();
@@ -941,6 +1012,7 @@ wss.on(
           }
 
         } catch (error) {
+
           console.log(
             "Message parsing error:",
             error.message
@@ -949,18 +1021,28 @@ wss.on(
       }
     );
 
+    // ==================================================
+    // CLOSE
+    // ==================================================
+
     ws.on(
       "close",
       () => {
+
         console.log(
-          "📞 Exotel disconnected."
+          "Exotel WebSocket disconnected."
         );
       }
     );
 
+    // ==================================================
+    // ERROR
+    // ==================================================
+
     ws.on(
       "error",
       (error) => {
+
         console.log(
           "WebSocket error:",
           error.message
@@ -971,7 +1053,7 @@ wss.on(
 );
 
 // ==================================================
-// START SERVER
+// SERVER START
 // ==================================================
 
 server.listen(
@@ -981,23 +1063,23 @@ server.listen(
 
     console.log("");
     console.log(
-      "================================"
+      "--------------------------------"
     );
     console.log(
-      "🚀 AI VOICE BRIDGE"
+      "AI VOICE BRIDGE"
     );
     console.log(
-      "================================"
+      "--------------------------------"
     );
 
     console.log(
       "HTTP:",
-      `http://localhost:${PORT}`
+      "http://localhost:" + PORT
     );
 
     console.log(
       "WebSocket:",
-      `ws://localhost:${PORT}`
+      "ws://localhost:" + PORT
     );
 
     console.log(
@@ -1007,26 +1089,22 @@ server.listen(
 
     console.log("");
     console.log(
-      "🧠 Groq: openai/gpt-oss-20b"
+      "Groq LLM: openai/gpt-oss-20b"
     );
 
     console.log(
-      "🌐 Browser search: ENABLED"
+      "Deepgram: Nova-3 STT"
     );
 
     console.log(
-      "🎤 Deepgram: Nova-3 STT"
-    );
-
-    console.log(
-      "🔊 Deepgram: Aura-2 TTS"
+      "Deepgram: Aura-2 TTS"
     );
 
     console.log("");
     console.log(
       "Waiting for Exotel..."
     );
+
     console.log("");
   }
 );
-```
