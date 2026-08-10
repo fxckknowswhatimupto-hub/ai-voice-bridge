@@ -9,10 +9,11 @@ const Groq = require("groq-sdk");
 const PORT = process.env.PORT || 10000;
 
 const PUBLIC_URL =
+  process.env.PUBLIC_URL ||
   "https://ai-voice-bridge-q8qv.onrender.com";
 
 const WS_URL =
-  PUBLIC_URL.replace("https://", "wss://");
+  PUBLIC_URL.replace(/^https:/, "wss:");
 
 const GROQ_MODEL =
   "llama-3.1-8b-instant";
@@ -23,19 +24,30 @@ const DEEPGRAM_STT_MODEL =
 const DEEPGRAM_TTS_MODEL =
   "aura-2-thalia-en";
 
+// ============================================================
+// AUDIO
+// ============================================================
+
 const SAMPLE_RATE = 8000;
 
-// 20ms phone audio = 160 samples * 2 bytes
-const AUDIO_CHUNK_SIZE = 320;
-const AUDIO_INTERVAL = 20;
+// 16-bit mono PCM
+const BYTES_PER_SAMPLE = 2;
+
+// 20 ms @ 8kHz
+// 8000 samples/sec * 0.02 sec * 2 bytes
+const AUDIO_CHUNK_SIZE =
+  160 * BYTES_PER_SAMPLE;
+
+const AUDIO_INTERVAL_MS = 20;
 
 // ============================================================
 // TIMEOUTS
 // ============================================================
 
-const TAVILY_TIMEOUT = 1800;
-const GROQ_TIMEOUT = 12000;
-const DEEPGRAM_CONNECT_TIMEOUT = 7000;
+const TAVILY_TIMEOUT_MS = 1800;
+const GROQ_TIMEOUT_MS = 12000;
+
+const DEEPGRAM_CONNECT_TIMEOUT_MS = 7000;
 
 // ============================================================
 // ENVIRONMENT
@@ -51,19 +63,25 @@ const TAVILY_API_KEY =
   process.env.TAVILY_API_KEY;
 
 if (!GROQ_API_KEY) {
-  throw new Error("GROQ_API_KEY is missing");
+  throw new Error(
+    "GROQ_API_KEY is missing"
+  );
 }
 
 if (!DEEPGRAM_API_KEY) {
-  throw new Error("DEEPGRAM_API_KEY is missing");
+  throw new Error(
+    "DEEPGRAM_API_KEY is missing"
+  );
 }
 
 if (!TAVILY_API_KEY) {
-  console.log("WARNING: TAVILY_API_KEY missing");
+  console.log(
+    "WARNING: TAVILY_API_KEY is missing"
+  );
 }
 
 // ============================================================
-// CLIENTS
+// CLIENT
 // ============================================================
 
 const groq =
@@ -72,51 +90,70 @@ const groq =
   });
 
 // ============================================================
-// CALL MANAGEMENT
+// ACTIVE CALLS
 // ============================================================
 
-const activeCalls = new Map();
+const activeCalls =
+  new Map();
 
-let callCounter = 1;
+let nextCallId = 1;
 
 // ============================================================
 // HTTP SERVER
 // ============================================================
 
 const server =
-  http.createServer((req, res) => {
+  http.createServer(
+    (req, res) => {
 
-    res.setHeader(
-      "Content-Type",
-      "application/json"
-    );
+      if (
+        req.url === "/health"
+      ) {
 
-    if (req.url === "/health") {
+        res.writeHead(
+          200,
+          {
+            "Content-Type":
+              "application/json"
+          }
+        );
 
-      res.writeHead(200);
+        res.end(
+          JSON.stringify({
+            status: "ok",
+            service:
+              "h-and-m-ai-voice-assistant",
+            model:
+              GROQ_MODEL,
+            activeCalls:
+              activeCalls.size
+          })
+        );
+
+        return;
+      }
+
+      res.writeHead(
+        200,
+        {
+          "Content-Type":
+            "application/json"
+        }
+      );
 
       res.end(
         JSON.stringify({
           status: "ok",
-          service: "h-and-m-ai-assistant",
-          model: GROQ_MODEL,
-          activeCalls: activeCalls.size
+          websocket:
+            WS_URL,
+          model:
+            GROQ_MODEL,
+          activeCalls:
+            activeCalls.size
         })
       );
-
-      return;
     }
-
-    res.writeHead(200);
-
-    res.end(
-      JSON.stringify({
-        status: "ok",
-        websocket: WS_URL,
-        activeCalls: activeCalls.size
-      })
-    );
-  });
+  );
 
 // ============================================================
 // WEBSOCKET SERVER
@@ -128,254 +165,61 @@ const wss =
   });
 
 // ============================================================
-// H&M SYSTEM PROMPT
+// SEARCH DETECTION
 // ============================================================
 
-const HM_SYSTEM_PROMPT = `
-You are an AI phone assistant for H&M.
-
-You are friendly, natural, fast and conversational.
-
-You are speaking to the customer on a PHONE CALL.
-
-IMPORTANT PHONE BEHAVIOR:
-
-- Speak naturally.
-- Keep responses short enough for a phone conversation.
-- Do not give giant paragraphs.
-- Usually answer in 1-3 short sentences.
-- Never sound like a robotic script.
-- Understand normal conversational language.
-- Understand incomplete sentences.
-- Understand accents and imperfect speech.
-- Understand follow-up questions using conversation memory.
-- If the customer describes a product naturally, understand what they mean.
-
-You help customers with:
-
-1. H&M products
-2. Clothing
-3. Jeans
-4. Dresses
-5. Shirts
-6. T-shirts
-7. Jackets
-8. Hoodies
-9. Shoes
-10. Accessories
-11. Colours
-12. Sizes
-13. Product recommendations
-14. Shopping assistance
-15. Product availability when current information is provided
-16. General H&M shopping questions
-
-PRODUCT UNDERSTANDING:
-
-If the customer says things such as:
-
-"bootcut jeans"
-"faded bluish green bootcut jeans"
-"dark blue jeans"
-"loose black hoodie"
-"oversized white t shirt"
-"something beige"
-"blue jeans for a casual outfit"
-
-UNDERSTAND THE DESCRIPTION.
-
-Do NOT respond with:
-"Sorry, I can only help with H&M products."
-
-Instead, interpret the description and continue helping.
-
-For example:
-
-Customer:
-"I want faded bluish-green bootcut jeans."
-
-You can respond:
-"Sure. You're looking for faded bluish-green bootcut jeans. What size are you looking for?"
-
-If the customer gives a colour that isn't an exact catalogue colour, interpret it naturally.
-
-Examples:
-
-bluish-green → blue-green / teal-like
-off-white → cream / ivory
-dark blue → navy / dark denim
-light blue → light denim
-faded black → washed black
-brownish beige → beige/tan
-
-SIZES:
-
-Understand:
-XS
-S
-M
-L
-XL
-XXL
-small
-medium
-large
-extra large
-size 30
-size 32
-size 34
-etc.
-
-If the customer hasn't given a size when one is needed, naturally ask for it.
-
-SHOPPING:
-
-If the customer says they want to buy something, help them narrow it down.
-
-Ask only one useful question at a time.
-
-Example:
-
-Customer:
-"I want bootcut jeans."
-
-Assistant:
-"Sure. What colour are you looking for?"
-
-Customer:
-"Faded bluish-green."
-
-Assistant:
-"Got it. What size do you need?"
-
-Customer:
-"32."
-
-Assistant:
-"Perfect. I'll look for faded bluish-green bootcut jeans in size 32."
-
-Do not repeatedly ask the customer the same question.
-
-CURRENT INFORMATION:
-
-If current product availability, price, store information, opening hours, latest information or other live information is supplied to you, use it.
-
-Never mention Tavily, APIs, web searches, tools or internal systems.
-
-UNAVAILABLE SERVICES:
-
-For services outside the currently implemented H&M shopping functionality, say naturally:
-
-"Sorry, that option isn't available right now."
-
-Do not invent unavailable functionality.
-
-CONVERSATION MEMORY:
-
-Remember what the customer has already told you during this call.
-
-For example:
-
-Customer:
-"I want men's jeans."
-
-Later:
-"What colours do you have?"
-
-Understand that "you" means the men's jeans being discussed.
-
-If the customer says:
-"what about black?"
-understand that black refers to the product currently being discussed.
-
-CALL ENDING:
-
-The customer may end the conversation using:
-
-"that's it"
-"nothing else"
-"no that's all"
-"I'm done"
-"bye"
-"goodbye"
-"that's everything"
-
-When the customer clearly uses one of these endings, respond briefly and politely.
-
-Example:
-"You're welcome. Have a great day!"
-
-Then the phone system will end the call.
-
-Do not keep asking questions after the customer clearly ends the conversation.
-
-GENERAL QUESTIONS:
-
-The customer may ask unrelated questions.
-
-Answer them naturally when possible.
-
-Do not falsely claim that every question must be about H&M.
-
-However, if the customer asks for an H&M service that is not implemented, say that the option is unavailable right now.
-
-IMPORTANT:
-
-Never say:
-"I am an AI language model."
-
-Never mention:
-Groq
-Deepgram
-Tavily
-APIs
-web search
-internal tools
-
-You are simply the H&M phone assistant.
-`;
-
-// ============================================================
-// WEB SEARCH DETECTION
-// ============================================================
-
-function needsWebSearch(question) {
+function needsWebSearch(
+  question
+) {
 
   const q =
-    question
+    String(question)
       .toLowerCase()
       .trim();
 
   const words = [
+
     "today",
     "tonight",
     "tomorrow",
-    "now",
-    "currently",
-    "current",
     "latest",
+    "current",
+    "currently",
+    "now",
     "recent",
+    "news",
+    "weather",
+    "temperature",
+
     "price",
     "prices",
     "cost",
+
     "available",
     "availability",
     "in stock",
     "stock",
+
     "store",
     "stores",
-    "opening",
-    "open now",
-    "closed",
+    "shop",
+    "shops",
+    "mall",
+
     "near me",
     "nearby",
     "location",
-    "where is",
-    "where are"
+
+    "opening",
+    "closing",
+    "hours",
+    "timing",
+    "timings"
   ];
 
   return words.some(
-    word => q.includes(word)
+    word =>
+      q.includes(word)
   );
 }
 
@@ -383,9 +227,13 @@ function needsWebSearch(question) {
 // TAVILY
 // ============================================================
 
-async function searchWeb(question) {
+async function searchWeb(
+  question
+) {
 
-  if (!TAVILY_API_KEY) {
+  if (
+    !TAVILY_API_KEY
+  ) {
     return "";
   }
 
@@ -393,9 +241,12 @@ async function searchWeb(question) {
     new AbortController();
 
   const timeout =
-    setTimeout(() => {
-      controller.abort();
-    }, TAVILY_TIMEOUT);
+    setTimeout(
+      () => {
+        controller.abort();
+      },
+      TAVILY_TIMEOUT_MS
+    );
 
   try {
 
@@ -403,51 +254,87 @@ async function searchWeb(question) {
       await fetch(
         "https://api.tavily.com/search",
         {
-          method: "POST",
+          method:
+            "POST",
 
           headers: {
             Authorization:
-              "Bearer " + TAVILY_API_KEY,
+              `Bearer ${TAVILY_API_KEY}`,
 
             "Content-Type":
               "application/json"
           },
 
-          body: JSON.stringify({
-            query: question,
-            search_depth: "basic",
-            topic: "general",
-            max_results: 2,
-            include_answer: true,
-            include_raw_content: false
-          }),
+          body:
+            JSON.stringify({
 
-          signal: controller.signal
+              query:
+                question,
+
+              search_depth:
+                "basic",
+
+              topic:
+                "general",
+
+              max_results:
+                2,
+
+              include_answer:
+                true,
+
+              include_raw_content:
+                false
+            }),
+
+          signal:
+            controller.signal
         }
       );
 
-    if (!response.ok) {
+    if (
+      !response.ok
+    ) {
+
+      console.log(
+        "Tavily HTTP:",
+        response.status
+      );
+
       return "";
     }
 
     const data =
       await response.json();
 
-    let result = "";
+    let result =
+      "";
 
-    if (data?.answer) {
-      result += data.answer + " ";
+    if (
+      data?.answer
+    ) {
+
+      result +=
+        String(
+          data.answer
+        ) + " ";
     }
 
-    if (Array.isArray(data?.results)) {
+    if (
+      Array.isArray(
+        data?.results
+      )
+    ) {
 
       for (
-        const item of data.results
+        const item of
+          data.results
       ) {
 
         result +=
-          `${item.title || ""}: ` +
-          `${item.content || ""} `;
+          `${item?.title || ""}: ${
+            item?.content || ""
+          } `;
       }
     }
 
@@ -458,8 +345,16 @@ async function searchWeb(question) {
   } catch (error) {
 
     if (
-      error.name !== "AbortError"
+      error.name ===
+      "AbortError"
     ) {
+
+      console.log(
+        "Tavily timeout"
+      );
+
+    } else {
+
       console.log(
         "Tavily error:",
         error.message
@@ -470,7 +365,9 @@ async function searchWeb(question) {
 
   } finally {
 
-    clearTimeout(timeout);
+    clearTimeout(
+      timeout
+    );
   }
 }
 
@@ -504,41 +401,49 @@ function createDeepgramSTT() {
           {
             headers: {
               Authorization:
-                "Token " +
-                DEEPGRAM_API_KEY
+                `Token ${DEEPGRAM_API_KEY}`
             }
           }
         );
 
-      let settled = false;
+      let settled =
+        false;
 
-      const timer =
-        setTimeout(() => {
+      const timeout =
+        setTimeout(
+          () => {
 
-          if (!settled) {
+            if (!settled) {
 
-            try {
-              socket.close();
-            } catch (_) {}
+              try {
+                socket.close();
+              } catch (_) {}
 
-            reject(
-              new Error(
-                "Deepgram STT timeout"
-              )
-            );
-          }
+              reject(
+                new Error(
+                  "Deepgram STT connection timeout"
+                )
+              );
+            }
 
-        }, DEEPGRAM_CONNECT_TIMEOUT);
+          },
+          DEEPGRAM_CONNECT_TIMEOUT_MS
+        );
 
       socket.once(
         "open",
         () => {
 
-          settled = true;
+          settled =
+            true;
 
-          clearTimeout(timer);
+          clearTimeout(
+            timeout
+          );
 
-          resolve(socket);
+          resolve(
+            socket
+          );
         }
       );
 
@@ -548,9 +453,16 @@ function createDeepgramSTT() {
 
           if (!settled) {
 
-            clearTimeout(timer);
+            settled =
+              true;
 
-            reject(error);
+            clearTimeout(
+              timeout
+            );
+
+            reject(
+              error
+            );
           }
         }
       );
@@ -575,7 +487,8 @@ function createDeepgramTTS() {
         ) +
         "&encoding=linear16" +
         "&sample_rate=8000" +
-        "&container=none";
+        "&container=none" +
+        "&speed=1.15";
 
       const socket =
         new WebSocket(
@@ -583,41 +496,49 @@ function createDeepgramTTS() {
           {
             headers: {
               Authorization:
-                "Token " +
-                DEEPGRAM_API_KEY
+                `Token ${DEEPGRAM_API_KEY}`
             }
           }
         );
 
-      let settled = false;
+      let settled =
+        false;
 
-      const timer =
-        setTimeout(() => {
+      const timeout =
+        setTimeout(
+          () => {
 
-          if (!settled) {
+            if (!settled) {
 
-            try {
-              socket.close();
-            } catch (_) {}
+              try {
+                socket.close();
+              } catch (_) {}
 
-            reject(
-              new Error(
-                "Deepgram TTS timeout"
-              )
-            );
-          }
+              reject(
+                new Error(
+                  "Deepgram TTS connection timeout"
+                )
+              );
+            }
 
-        }, DEEPGRAM_CONNECT_TIMEOUT);
+          },
+          DEEPGRAM_CONNECT_TIMEOUT_MS
+        );
 
       socket.once(
         "open",
         () => {
 
-          settled = true;
+          settled =
+            true;
 
-          clearTimeout(timer);
+          clearTimeout(
+            timeout
+          );
 
-          resolve(socket);
+          resolve(
+            socket
+          );
         }
       );
 
@@ -627,9 +548,16 @@ function createDeepgramTTS() {
 
           if (!settled) {
 
-            clearTimeout(timer);
+            settled =
+              true;
 
-            reject(error);
+            clearTimeout(
+              timeout
+            );
+
+            reject(
+              error
+            );
           }
         }
       );
@@ -638,10 +566,12 @@ function createDeepgramTTS() {
 }
 
 // ============================================================
-// CLOSE DEEPGRAM
+// SAFE SOCKET CLOSE
 // ============================================================
 
-function closeSocket(socket) {
+function closeSocket(
+  socket
+) {
 
   if (!socket) {
     return;
@@ -656,7 +586,8 @@ function closeSocket(socket) {
 
       socket.send(
         JSON.stringify({
-          type: "Close"
+          type:
+            "Close"
         })
       );
     }
@@ -671,55 +602,66 @@ function closeSocket(socket) {
 // ============================================================
 // EXOTEL AUDIO QUEUE
 // ============================================================
-//
-// IMPORTANT:
-// Deepgram may generate audio faster than the phone can play it.
-//
-// We therefore pace the audio at exactly 20ms per chunk.
-// This prevents audio buildup and massive delay.
-// ============================================================
 
-function createAudioQueue(call) {
+function createAudioQueue(
+  call
+) {
 
-  const queue = [];
+  const queue =
+    [];
 
-  let timer = null;
+  let timer =
+    null;
 
-  let stopped = false;
+  let stopped =
+    false;
 
-  let sequence = 1;
+  let sequenceNumber =
+    1;
 
-  let chunkNumber = 0;
+  let chunkNumber =
+    0;
 
-  let timestamp = 0;
+  let timestamp =
+    0;
 
-  function clear() {
+  function schedule() {
 
-    queue.length = 0;
-
-    if (timer) {
-
-      clearTimeout(timer);
-
-      timer = null;
+    if (
+      timer ||
+      stopped
+    ) {
+      return;
     }
-  }
 
-  function stop() {
+    timer =
+      setTimeout(
+        () => {
 
-    stopped = true;
+          timer =
+            null;
 
-    clear();
+          sendNext();
+
+        },
+        AUDIO_INTERVAL_MS
+      );
   }
 
   function sendNext() {
-
-    timer = null;
 
     if (
       stopped ||
       call.destroyed
     ) {
+
+      return;
+    }
+
+    if (
+      queue.length === 0
+    ) {
+
       return;
     }
 
@@ -728,30 +670,65 @@ function createAudioQueue(call) {
       call.ws.readyState !==
         WebSocket.OPEN
     ) {
-      clear();
+
+      queue.length =
+        0;
+
       return;
     }
 
-    if (!call.streamSid) {
+    if (
+      !call.streamSid
+    ) {
+
+      schedule();
+
       return;
     }
 
-    if (queue.length === 0) {
+    const audio =
+      queue.shift();
+
+    if (
+      !audio ||
+      audio.length === 0
+    ) {
+
+      schedule();
+
       return;
     }
 
     const chunk =
-      queue.shift();
+      audio.subarray(
+        0,
+        AUDIO_CHUNK_SIZE
+      );
+
+    if (
+      audio.length >
+      AUDIO_CHUNK_SIZE
+    ) {
+
+      queue.unshift(
+        audio.subarray(
+          AUDIO_CHUNK_SIZE
+        )
+      );
+    }
 
     try {
 
       call.ws.send(
         JSON.stringify({
 
-          event: "media",
+          event:
+            "media",
 
           sequence_number:
-            String(sequence++),
+            String(
+              sequenceNumber++
+            ),
 
           stream_sid:
             call.streamSid,
@@ -759,10 +736,14 @@ function createAudioQueue(call) {
           media: {
 
             chunk:
-              String(chunkNumber++),
+              String(
+                chunkNumber++
+              ),
 
             timestamp:
-              String(timestamp),
+              String(
+                timestamp
+              ),
 
             payload:
               chunk.toString(
@@ -773,12 +754,12 @@ function createAudioQueue(call) {
       );
 
       timestamp +=
-        AUDIO_INTERVAL;
+        AUDIO_INTERVAL_MS;
 
     } catch (error) {
 
       console.log(
-        `[${call.id}] audio send error:`,
+        `[${call.id}] AUDIO SEND ERROR:`,
         error.message
       );
 
@@ -789,22 +770,21 @@ function createAudioQueue(call) {
       queue.length > 0
     ) {
 
-      timer =
-        setTimeout(
-          sendNext,
-          AUDIO_INTERVAL
-        );
+      schedule();
     }
   }
 
-  function enqueue(buffer) {
+  function enqueue(
+    buffer
+  ) {
 
     if (
       stopped ||
       call.destroyed ||
       !buffer ||
-      !buffer.length
+      buffer.length === 0
     ) {
+
       return;
     }
 
@@ -814,28 +794,52 @@ function createAudioQueue(call) {
       offset += AUDIO_CHUNK_SIZE
     ) {
 
-      const chunk =
-        buffer.subarray(
-          offset,
-          Math.min(
-            offset +
-              AUDIO_CHUNK_SIZE,
-            buffer.length
+      queue.push(
+        Buffer.from(
+          buffer.subarray(
+            offset,
+            Math.min(
+              offset +
+                AUDIO_CHUNK_SIZE,
+              buffer.length
+            )
           )
-        );
-
-      queue.push(chunk);
+        )
+      );
     }
 
-    if (!timer) {
-      sendNext();
+    sendNext();
+  }
+
+  function clear() {
+
+    queue.length =
+      0;
+
+    if (timer) {
+
+      clearTimeout(
+        timer
+      );
+
+      timer =
+        null;
     }
   }
 
+  function stop() {
+
+    stopped =
+      true;
+
+    clear();
+  }
+
   function pending() {
+
     return (
       queue.length > 0 ||
-      timer !== null
+      Boolean(timer)
     );
   }
 
@@ -848,16 +852,20 @@ function createAudioQueue(call) {
 }
 
 // ============================================================
-// CLEAR EXOTEL AUDIO
+// EXOTEL CLEAR AUDIO
 // ============================================================
 
-function clearExotelAudio(call) {
+function clearExotelAudio(
+  call
+) {
 
   if (
     !call.ws ||
     call.ws.readyState !==
-      WebSocket.OPEN
+      WebSocket.OPEN ||
+    !call.streamSid
   ) {
+
     return;
   }
 
@@ -866,23 +874,119 @@ function clearExotelAudio(call) {
     call.ws.send(
       JSON.stringify({
 
-        event: "clear",
+        event:
+          "clear",
 
         stream_sid:
           call.streamSid
       })
     );
 
-  } catch (_) {}
+    console.log(
+      `[${call.id}] 🔥 Exotel audio cleared`
+    );
+
+  } catch (error) {
+
+    console.log(
+      `[${call.id}] CLEAR ERROR:`,
+      error.message
+    );
+  }
 }
 
 // ============================================================
-// INTERRUPT CURRENT AI
+// SEND TTS TEXT
+// ============================================================
+
+function sendTTS(
+  call,
+  text
+) {
+
+  if (
+    call.destroyed ||
+    !call.ttsSocket ||
+    call.ttsSocket.readyState !==
+      WebSocket.OPEN
+  ) {
+
+    return false;
+  }
+
+  try {
+
+    call.ttsSocket.send(
+      JSON.stringify({
+
+        type:
+          "Speak",
+
+        text:
+          text
+      })
+    );
+
+    return true;
+
+  } catch (error) {
+
+    console.log(
+      `[${call.id}] TTS SEND ERROR:`,
+      error.message
+    );
+
+    return false;
+  }
+}
+
+// ============================================================
+// FLUSH TTS
+// ============================================================
+
+function flushTTS(
+  call
+) {
+
+  if (
+    call.destroyed ||
+    !call.ttsSocket ||
+    call.ttsSocket.readyState !==
+      WebSocket.OPEN
+  ) {
+
+    return false;
+  }
+
+  try {
+
+    call.ttsSocket.send(
+      JSON.stringify({
+        type:
+          "Flush"
+      })
+    );
+
+    return true;
+
+  } catch (error) {
+
+    console.log(
+      `[${call.id}] TTS FLUSH ERROR:`,
+      error.message
+    );
+
+    return false;
+  }
+}
+
+// ============================================================
+// INTERRUPT
 // ============================================================
 
 function interruptAI(
   call,
-  reason = "barge-in"
+  reason
 ) {
 
   if (
@@ -892,30 +996,35 @@ function interruptAI(
   }
 
   if (
-    !call.aiSpeaking &&
-    !call.groqRunning
+    !call.aiGenerating &&
+    !call.aiPlaying
   ) {
+
     return;
   }
 
   console.log(
-    `[${call.id}] 🔴 INTERRUPT: ${reason}`
+    `[${call.id}] 🛑 INTERRUPT: ${reason}`
   );
 
-  // Invalidate everything currently running.
-  call.generation++;
+  // Invalidate current generation.
+  call.responseGeneration++;
 
-  call.aiSpeaking = false;
+  call.aiGenerating =
+    false;
 
-  call.groqRunning = false;
+  call.aiPlaying =
+    false;
 
-  // Destroy queued TTS audio.
+  // Stop queued local audio.
   call.audioQueue.clear();
 
-  // Tell Exotel to immediately stop playback.
-  clearExotelAudio(call);
+  // Stop anything already buffered by Exotel.
+  clearExotelAudio(
+    call
+  );
 
-  // Flush Deepgram TTS.
+  // Clear Deepgram TTS text buffer.
   if (
     call.ttsSocket &&
     call.ttsSocket.readyState ===
@@ -926,7 +1035,8 @@ function interruptAI(
 
       call.ttsSocket.send(
         JSON.stringify({
-          type: "Flush"
+          type:
+            "Clear"
         })
       );
 
@@ -938,89 +1048,78 @@ function interruptAI(
 // END CALL DETECTION
 // ============================================================
 
-function isEndingPhrase(text) {
+function isEndPhrase(
+  text
+) {
 
   const q =
     text
       .toLowerCase()
-      .replace(/[.!?,]/g, "")
-      .replace(/\s+/g, " ")
+      .replace(
+        /[.!?,]/g,
+        ""
+      )
       .trim();
 
-  const endings = [
+  const phrases = [
+
     "that's it",
     "thats it",
+
     "nothing else",
+
     "no that's all",
     "no thats all",
-    "that's all",
-    "thats all",
+
     "i'm done",
     "im done",
+
     "bye",
     "goodbye",
+
     "that's everything",
     "thats everything"
   ];
 
-  return endings.includes(q);
+  return phrases.some(
+    phrase =>
+      q === phrase ||
+      q.endsWith(
+        ` ${phrase}`
+      )
+  );
 }
 
 // ============================================================
-// HANG UP
-// ============================================================
-//
-// Exotel call termination is normally controlled by the
-// Exotel call-flow / stream configuration.
-//
-// We send a clean close signal to our stream and then close
-// the WebSocket. If your Exotel flow has an explicit hangup
-// instruction, that flow should terminate the call.
+// MEMORY
 // ============================================================
 
-function endCall(call) {
+function addMemory(
+  call,
+  role,
+  content
+) {
 
+  call.conversationHistory.push({
+    role,
+    content
+  });
+
+  // Keep 8 messages = 4 exchanges.
   if (
-    call.destroyed
+    call.conversationHistory.length >
+    8
   ) {
-    return;
+
+    call.conversationHistory =
+      call.conversationHistory.slice(
+        -8
+      );
   }
-
-  if (
-    call.ending
-  ) {
-    return;
-  }
-
-  call.ending = true;
-
-  console.log(
-    `[${call.id}] ☎️ ENDING CALL`
-  );
-
-  interruptAI(
-    call,
-    "customer ended conversation"
-  );
-
-  setTimeout(() => {
-
-    if (
-      call.ws &&
-      call.ws.readyState ===
-        WebSocket.OPEN
-    ) {
-
-      try {
-        call.ws.close();
-      } catch (_) {}
-    }
-
-  }, 900);
 }
 
 // ============================================================
-// STREAM GROQ
+// GROQ STREAM
 // ============================================================
 
 async function streamGroq(
@@ -1034,49 +1133,79 @@ async function streamGroq(
   const messages = [
 
     {
-      role: "system",
-      content: HM_SYSTEM_PROMPT
+      role:
+        "system",
+
+      content:
+
+        "You are an H&M phone shopping assistant. " +
+
+        "Speak naturally like a real helpful human phone assistant. " +
+
+        "You are allowed to understand normal human language, slang, descriptions, colors, clothing styles, sizes, budgets and follow-up questions. " +
+
+        "Do NOT reject a customer simply because they use an unusual color name or clothing description. " +
+
+        "For example, if someone says faded bluish-green, understand it as a color description and continue naturally. " +
+
+        "Never say that you can only understand official H&M product names. " +
+
+        "If the customer describes something approximately, interpret what they mean. " +
+
+        "Remember the conversation and use previous answers when answering follow-up questions. " +
+
+        "The assistant currently supports product questions, shopping help and size guidance. " +
+
+        "For unrelated H&M services such as returns, refunds, payments, account issues, store complaints or delivery support, politely say that service is currently unavailable. " +
+
+        "Keep answers short because this is a phone conversation. " +
+
+        "Do not use markdown. " +
+
+        "Do not mention APIs, Tavily, Groq, Deepgram, tools or internal systems. " +
+
+        "Do not say 'as an AI'. " +
+
+        "Ask only one question at a time. " +
+
+        "If the customer is choosing a product, help narrow it down naturally."
     }
   ];
 
-  // ==========================================================
-  // MEMORY
-  // ==========================================================
-
   for (
     const item of
-      call.history
+      call.conversationHistory
   ) {
 
     messages.push({
-      role: item.role,
-      content: item.content
+      role:
+        item.role,
+
+      content:
+        item.content
     });
   }
 
-  // ==========================================================
-  // WEB DATA
-  // ==========================================================
-
-  if (webInfo) {
+  if (
+    webInfo
+  ) {
 
     messages.push({
 
-      role: "system",
+      role:
+        "system",
 
       content:
-        "Current information:\n" +
-        webInfo
+        "Current web information:\n" +
+        webInfo +
+        "\nUse it when useful. Do not mention the search."
     });
   }
 
-  // ==========================================================
-  // USER
-  // ==========================================================
-
   messages.push({
 
-    role: "user",
+    role:
+      "user",
 
     content:
       question
@@ -1086,9 +1215,12 @@ async function streamGroq(
     new AbortController();
 
   const timeout =
-    setTimeout(() => {
-      controller.abort();
-    }, GROQ_TIMEOUT);
+    setTimeout(
+      () => {
+        controller.abort();
+      },
+      GROQ_TIMEOUT_MS
+    );
 
   try {
 
@@ -1118,27 +1250,23 @@ async function streamGroq(
         }
       );
 
-    let answer = "";
+    let answer =
+      "";
 
-    let pending = "";
+    let pending =
+      "";
 
     for await (
-      const chunk of stream
+      const chunk of
+        stream
     ) {
 
-      // ======================================================
-      // BARGE-IN CHECK
-      // ======================================================
-
+      // Current response invalidated.
       if (
         call.destroyed ||
-        call.generation !==
+        call.responseGeneration !==
           generation
       ) {
-
-        console.log(
-          `[${call.id}] OLD GROQ STREAM STOPPED`
-        );
 
         break;
       }
@@ -1149,17 +1277,21 @@ async function streamGroq(
           ?.delta
           ?.content || "";
 
-      if (!token) {
+      if (
+        !token
+      ) {
         continue;
       }
 
-      answer += token;
+      answer +=
+        token;
 
-      pending += token;
+      pending +=
+        token;
 
-      // ======================================================
+      // ----------------------------------------------------
       // SENTENCE
-      // ======================================================
+      // ----------------------------------------------------
 
       let match;
 
@@ -1173,15 +1305,20 @@ async function streamGroq(
       ) {
 
         if (
-          call.generation !==
-          generation
+          call.destroyed ||
+          call.responseGeneration !==
+            generation
         ) {
+
           break;
         }
 
-        const text =
+        const sentence =
           match[1]
-            .replace(/\s+/g, " ")
+            .replace(
+              /\s+/g,
+              " "
+            )
             .trim();
 
         pending =
@@ -1191,33 +1328,35 @@ async function streamGroq(
             )
             .trimStart();
 
-        if (text) {
+        if (
+          sentence
+        ) {
 
           await onText(
-            text
+            sentence
           );
         }
       }
 
-      // ======================================================
+      // ----------------------------------------------------
       // EARLY CHUNK
-      // ======================================================
-      //
-      // Don't wait for a whole long paragraph.
-      // ======================================================
+      // ----------------------------------------------------
 
       if (
-        pending.length >= 42
+        pending.length >=
+        55
       ) {
 
         const lastSpace =
-          pending.lastIndexOf(" ");
+          pending.lastIndexOf(
+            " "
+          );
 
         if (
-          lastSpace >= 22
+          lastSpace >= 25
         ) {
 
-          const text =
+          const chunkText =
             pending
               .slice(
                 0,
@@ -1232,121 +1371,47 @@ async function streamGroq(
               )
               .trimStart();
 
-          if (text) {
+          if (
+            chunkText
+          ) {
 
             await onText(
-              text
+              chunkText
             );
           }
         }
       }
     }
 
-    // ======================================================
-    // REMAINING TEXT
-    // ======================================================
-
     if (
       pending.trim() &&
-      call.generation ===
+      !call.destroyed &&
+      call.responseGeneration ===
         generation
     ) {
 
       await onText(
         pending
-          .replace(/\s+/g, " ")
+          .replace(
+            /\s+/g,
+            " "
+          )
           .trim()
       );
     }
 
     return answer
-      .replace(/\s+/g, " ")
+      .replace(
+        /\s+/g,
+        " "
+      )
       .trim();
 
   } finally {
 
-    clearTimeout(timeout);
-  }
-}
-
-// ============================================================
-// SEND TEXT TO TTS
-// ============================================================
-
-function sendTTS(
-  call,
-  text,
-  generation
-) {
-
-  if (
-    call.destroyed ||
-    call.generation !==
-      generation
-  ) {
-    return false;
-  }
-
-  if (
-    !call.ttsSocket ||
-    call.ttsSocket.readyState !==
-      WebSocket.OPEN
-  ) {
-    return false;
-  }
-
-  try {
-
-    call.ttsSocket.send(
-      JSON.stringify({
-
-        type: "Speak",
-
-        text:
-          text
-      })
+    clearTimeout(
+      timeout
     );
-
-    return true;
-
-  } catch (error) {
-
-    console.log(
-      `[${call.id}] TTS error:`,
-      error.message
-    );
-
-    return false;
-  }
-}
-
-// ============================================================
-// FLUSH TTS
-// ============================================================
-
-function flushTTS(call) {
-
-  if (
-    !call.ttsSocket ||
-    call.ttsSocket.readyState !==
-      WebSocket.OPEN
-  ) {
-    return false;
-  }
-
-  try {
-
-    call.ttsSocket.send(
-      JSON.stringify({
-        type: "Flush"
-      })
-    );
-
-    return true;
-
-  } catch (_) {
-
-    return false;
   }
 }
 
@@ -1360,135 +1425,180 @@ async function processQuestion(
 ) {
 
   if (
-    call.destroyed ||
-    call.ending
+    call.destroyed
   ) {
     return;
   }
 
   const clean =
     String(question)
-      .replace(/\s+/g, " ")
+      .replace(
+        /\s+/g,
+        " "
+      )
       .trim();
 
-  if (!clean) {
+  if (
+    !clean
+  ) {
     return;
   }
 
   console.log(
-    `[${call.id}] 👤 CUSTOMER: ${clean}`
+    `[${call.id}] 👤 USER:`,
+    clean
   );
 
-  // ==========================================================
-  // ENDING
-  // ==========================================================
+  // ----------------------------------------------------------
+  // END PHRASE
+  // ----------------------------------------------------------
 
   if (
-    isEndingPhrase(clean)
+    isEndPhrase(
+      clean
+    )
   ) {
 
     console.log(
-      `[${call.id}] CUSTOMER WANTS TO END`
+      `[${call.id}] CALL END PHRASE`
     );
 
     const generation =
-      ++call.generation;
+      ++call.responseGeneration;
 
-    call.aiSpeaking = true;
+    call.aiGenerating =
+      false;
 
-    const goodbye =
-      "You're welcome. Have a great day!";
+    call.aiPlaying =
+      true;
+
+    call.audioQueue.clear();
+
+    clearExotelAudio(
+      call
+    );
 
     sendTTS(
       call,
-      goodbye,
-      generation
+      "You're welcome. Have a great day!"
     );
 
-    flushTTS(call);
+    flushTTS(
+      call
+    );
 
-    setTimeout(() => {
+    // We don't immediately destroy the websocket.
+    // Give Exotel a moment to receive the goodbye.
+    setTimeout(
+      () => {
 
-      endCall(call);
+        if (
+          !call.destroyed &&
+          call.responseGeneration ===
+            generation
+        ) {
 
-    }, 1800);
+          destroyCall(
+            call
+          );
+        }
+
+      },
+      1800
+    );
 
     return;
   }
 
-  // ==========================================================
-  // NEW RESPONSE GENERATION
-  // ==========================================================
+  // ----------------------------------------------------------
+  // NEW GENERATION
+  // ----------------------------------------------------------
 
   const generation =
-    ++call.generation;
+    ++call.responseGeneration;
 
-  call.aiSpeaking = true;
+  call.aiGenerating =
+    true;
 
-  call.groqRunning = true;
+  call.aiPlaying =
+    false;
 
-  let sentAudio = false;
+  // ----------------------------------------------------------
+  // SEARCH
+  // ----------------------------------------------------------
+
+  let webInfo =
+    "";
+
+  if (
+    needsWebSearch(
+      clean
+    )
+  ) {
+
+    console.log(
+      `[${call.id}] 🌐 SEARCH`
+    );
+
+    webInfo =
+      await searchWeb(
+        clean
+      );
+  }
+
+  if (
+    call.destroyed ||
+    call.responseGeneration !==
+      generation
+  ) {
+
+    return;
+  }
+
+  // ----------------------------------------------------------
+  // TTS
+  // ----------------------------------------------------------
+
+  let sentAnything =
+    false;
+
+  const sendText =
+    async text => {
+
+      if (
+        call.destroyed ||
+        call.responseGeneration !==
+          generation
+      ) {
+
+        return;
+      }
+
+      if (
+        !text
+      ) {
+        return;
+      }
+
+      const sent =
+        sendTTS(
+          call,
+          text
+        );
+
+      if (
+        sent
+      ) {
+
+        sentAnything =
+          true;
+
+        call.aiPlaying =
+          true;
+      }
+    };
 
   try {
-
-    // ========================================================
-    // SEARCH
-    // ========================================================
-
-    let webInfo = "";
-
-    if (
-      needsWebSearch(clean)
-    ) {
-
-      console.log(
-        `[${call.id}] 🌐 LIVE SEARCH`
-      );
-
-      webInfo =
-        await searchWeb(clean);
-
-    }
-
-    // Caller may have interrupted while Tavily was running.
-    if (
-      call.destroyed ||
-      call.generation !==
-        generation
-    ) {
-      return;
-    }
-
-    // ========================================================
-    // TTS CALLBACK
-    // ========================================================
-
-    const onText =
-      async text => {
-
-        if (
-          call.destroyed ||
-          call.generation !==
-            generation
-        ) {
-          return;
-        }
-
-        const ok =
-          sendTTS(
-            call,
-            text,
-            generation
-          );
-
-        if (ok) {
-          sentAudio = true;
-        }
-      };
-
-    // ========================================================
-    // GROQ
-    // ========================================================
 
     const answer =
       await streamGroq(
@@ -1496,112 +1606,83 @@ async function processQuestion(
         clean,
         webInfo,
         generation,
-        onText
+        sendText
       );
-
-    // ========================================================
-    // INTERRUPTED
-    // ========================================================
 
     if (
       call.destroyed ||
-      call.generation !==
+      call.responseGeneration !==
         generation
     ) {
 
       return;
     }
 
-    // ========================================================
-    // FLUSH TTS
-    // ========================================================
-
-    if (sentAudio) {
-
-      flushTTS(call);
-    }
-
-    // ========================================================
-    // MEMORY
-    // ========================================================
-
     if (
-      answer &&
-      call.generation ===
-        generation
+      sentAnything
     ) {
 
-      call.history.push({
+      flushTTS(
+        call
+      );
+    }
 
-        role:
-          "user",
+    if (
+      answer
+    ) {
 
-        content:
-          clean
-      });
+      addMemory(
+        call,
+        "user",
+        clean
+      );
 
-      call.history.push({
-
-        role:
-          "assistant",
-
-        content:
-          answer
-      });
-
-      // Keep last 6 exchanges.
-      if (
-        call.history.length >
-        12
-      ) {
-
-        call.history =
-          call.history.slice(-12);
-      }
+      addMemory(
+        call,
+        "assistant",
+        answer
+      );
     }
 
     console.log(
-      `[${call.id}] 🤖 AI: ${answer}`
+      `[${call.id}] 🤖 AI:`,
+      answer
     );
 
   } catch (error) {
 
     if (
-      call.generation !==
-      generation
+      call.destroyed ||
+      call.responseGeneration !==
+        generation
     ) {
-      return;
-    }
 
-    if (
-      call.destroyed
-    ) {
       return;
     }
 
     console.log(
-      `[${call.id}] PROCESS ERROR:`,
+      `[${call.id}] GROQ ERROR:`,
       error.message
     );
 
     sendTTS(
       call,
-      "Sorry, I had trouble answering that.",
-      generation
+      "Sorry, I had trouble with that. Could you try again?"
     );
 
-    flushTTS(call);
+    flushTTS(
+      call
+    );
 
   } finally {
 
     if (
-      call.generation ===
+      call.responseGeneration ===
       generation
     ) {
 
-      call.aiSpeaking = false;
-
-      call.groqRunning = false;
+      call.aiGenerating =
+        false;
     }
   }
 }
@@ -1610,54 +1691,63 @@ async function processQuestion(
 // QUESTION QUEUE
 // ============================================================
 
-function addQuestion(
+function enqueueQuestion(
   call,
   question
 ) {
 
   if (
-    call.destroyed ||
-    call.ending
+    call.destroyed
   ) {
     return;
   }
 
   const clean =
     String(question)
-      .replace(/\s+/g, " ")
+      .replace(
+        /\s+/g,
+        " "
+      )
       .trim();
 
-  if (!clean) {
+  if (
+    !clean
+  ) {
     return;
   }
 
-  // If AI is speaking, immediately interrupt it.
+  // If AI is currently speaking/generating,
+  // caller has barged in.
   if (
-    call.aiSpeaking ||
-    call.groqRunning
+    call.aiPlaying ||
+    call.aiGenerating
   ) {
 
     interruptAI(
       call,
-      "customer spoke"
+      "caller spoke"
     );
 
-    call.questionQueue.length = 0;
+    call.questionQueue =
+      [];
   }
 
-  // Newest question gets priority.
-  call.questionQueue.unshift(
+  call.questionQueue.push(
     clean
   );
 
-  runQueue(call);
+  runQuestionQueue(
+    call
+  );
 }
 
 // ============================================================
-// RUN QUEUE
+// QUESTION QUEUE RUNNER
 // ============================================================
 
-async function runQueue(call) {
+async function runQuestionQueue(
+  call
+) {
 
   if (
     call.queueRunning ||
@@ -1666,14 +1756,14 @@ async function runQueue(call) {
     return;
   }
 
-  call.queueRunning = true;
+  call.queueRunning =
+    true;
 
   try {
 
     while (
       call.questionQueue.length > 0 &&
-      !call.destroyed &&
-      !call.ending
+      !call.destroyed
     ) {
 
       const question =
@@ -1694,7 +1784,8 @@ async function runQueue(call) {
 
   } finally {
 
-    call.queueRunning = false;
+    call.queueRunning =
+      false;
   }
 }
 
@@ -1702,20 +1793,20 @@ async function runQueue(call) {
 // CREATE CALL
 // ============================================================
 
-function createCall(ws) {
+function createCall(
+  ws
+) {
+
+  const id =
+    `CALL-${nextCallId++}`;
 
   const call = {
 
-    id:
-      "CALL-" +
-      callCounter++,
+    id,
 
     ws,
 
     destroyed:
-      false,
-
-    ending:
       false,
 
     streamSid:
@@ -1723,6 +1814,12 @@ function createCall(ws) {
 
     callSid:
       null,
+
+    started:
+      false,
+
+    greeted:
+      false,
 
     sttSocket:
       null,
@@ -1736,7 +1833,28 @@ function createCall(ws) {
     ttsReady:
       false,
 
-    history:
+    // --------------------------------------------------------
+    // IMPORTANT:
+    // AUDIO THAT ARRIVES BEFORE DEEPGRAM IS READY
+    // IS BUFFERED INSTEAD OF DROPPED.
+    // --------------------------------------------------------
+
+    pendingInboundAudio:
+      [],
+
+    pendingInboundBytes:
+      0,
+
+    maxPendingInboundBytes:
+      8000 * 2 * 3,
+
+    speechFinalParts:
+      [],
+
+    lastInterim:
+      "",
+
+    conversationHistory:
       [],
 
     questionQueue:
@@ -1745,84 +1863,106 @@ function createCall(ws) {
     queueRunning:
       false,
 
-    aiSpeaking:
-      false,
-
-    groqRunning:
-      false,
-
-    generation:
-      0,
-
-    speechParts:
-      [],
-
-    lastInterim:
-      "",
-
-    lastSpeechTime:
-      0,
-
     audioQueue:
+      null,
+
+    aiGenerating:
+      false,
+
+    aiPlaying:
+      false,
+
+    responseGeneration:
+      0,
+
+    sttKeepAlive:
+      null,
+
+    ttsKeepAlive:
       null
   };
 
   call.audioQueue =
-    createAudioQueue(call);
+    createAudioQueue(
+      call
+    );
 
   return call;
 }
 
 // ============================================================
-// DESTROY CALL
+// GREETING
 // ============================================================
 
-function destroyCall(call) {
+async function greetCall(
+  call
+) {
 
   if (
-    !call ||
-    call.destroyed
+    call.destroyed ||
+    call.greeted ||
+    !call.started ||
+    !call.ttsReady
   ) {
+
     return;
   }
 
-  call.destroyed = true;
+  call.greeted =
+    true;
 
-  call.generation++;
+  console.log(
+    `[${call.id}] 🔊 SENDING GREETING`
+  );
 
-  call.aiSpeaking = false;
+  const generation =
+    ++call.responseGeneration;
 
-  call.groqRunning = false;
+  call.aiPlaying =
+    true;
 
-  call.questionQueue = [];
-
-  call.speechParts = [];
+  const greeting =
+    "Hi! Welcome to H and M. I can help you find products, choose styles and colors, and help with sizes. What would you like to shop for today?";
 
   if (
-    call.audioQueue
+    !sendTTS(
+      call,
+      greeting
+    )
   ) {
 
-    call.audioQueue.stop();
+    call.greeted =
+      false;
+
+    call.aiPlaying =
+      false;
+
+    console.log(
+      `[${call.id}] GREETING FAILED - TTS NOT READY`
+    );
+
+    return;
   }
 
-  closeSocket(
-    call.sttSocket
+  flushTTS(
+    call
   );
 
-  closeSocket(
-    call.ttsSocket
-  );
+  setTimeout(
+    () => {
 
-  activeCalls.delete(
-    call.id
-  );
+      if (
+        !call.destroyed &&
+        call.responseGeneration ===
+          generation
+      ) {
 
-  console.log(
-    `[${call.id}] ☎️ CALL CLEANED`
-  );
+        call.aiPlaying =
+          false;
+      }
 
-  console.log(
-    `ACTIVE CALLS: ${activeCalls.size}`
+    },
+    3500
   );
 }
 
@@ -1830,9 +1970,15 @@ function destroyCall(call) {
 // SETUP DEEPGRAM
 // ============================================================
 
-async function setupDeepgram(call) {
+async function setupDeepgram(
+  call
+) {
 
   try {
+
+    console.log(
+      `[${call.id}] Connecting Deepgram...`
+    );
 
     const [
       stt,
@@ -1847,24 +1993,35 @@ async function setupDeepgram(call) {
       call.destroyed
     ) {
 
-      closeSocket(stt);
-      closeSocket(tts);
+      closeSocket(
+        stt
+      );
+
+      closeSocket(
+        tts
+      );
 
       return;
     }
 
-    call.sttSocket = stt;
-    call.ttsSocket = tts;
+    call.sttSocket =
+      stt;
 
-    call.sttReady = true;
-    call.ttsReady = true;
+    call.ttsSocket =
+      tts;
+
+    call.sttReady =
+      true;
+
+    call.ttsReady =
+      true;
 
     console.log(
-      `[${call.id}] 🎙️ DEEPGRAM READY`
+      `[${call.id}] ✅ DEEPGRAM READY`
     );
 
     // ========================================================
-    // STT
+    // STT MESSAGE
     // ========================================================
 
     stt.on(
@@ -1879,42 +2036,44 @@ async function setupDeepgram(call) {
 
         try {
 
-          const data =
+          const message =
             JSON.parse(
               raw.toString()
             );
 
           const transcript =
-            data
+            message
               ?.channel
               ?.alternatives?.[0]
               ?.transcript || "";
 
-          if (!transcript) {
+          if (
+            !transcript
+          ) {
+
             return;
           }
 
-          // ==================================================
+          // --------------------------------------------------
           // INTERIM
-          // ==================================================
+          // --------------------------------------------------
 
           if (
-            !data.is_final
+            !message.is_final
           ) {
 
             call.lastInterim =
               transcript;
 
-            call.lastSpeechTime =
-              Date.now();
-
-            // ================================================
             // BARGE-IN
-            // ================================================
-
             if (
-              call.aiSpeaking ||
-              call.groqRunning
+              (
+                call.aiPlaying ||
+                call.aiGenerating
+              ) &&
+              transcript
+                .trim()
+                .length >= 2
             ) {
 
               const text =
@@ -1922,63 +2081,60 @@ async function setupDeepgram(call) {
                   .toLowerCase()
                   .trim();
 
-              if (
-                text.length >= 2
-              ) {
-
-                const explicit =
-                  /^(stop|wait|hold on|hang on|pause|no wait|be quiet|that's enough|thats enough|enough)\b/i
-                    .test(text);
-
-                // Any real speech during AI playback
-                // counts as a barge-in.
-                if (
-                  explicit ||
-                  text.length >= 3
-                ) {
-
-                  interruptAI(
-                    call,
-                    explicit
-                      ? "explicit stop"
-                      : "natural barge-in"
+              const explicitStop =
+                /^(stop|wait|hold on|hang on|be quiet|enough|pause|that's enough|thats enough)\b/i
+                  .test(
+                    text
                   );
-                }
-              }
+
+              interruptAI(
+                call,
+                explicitStop
+                  ? "explicit interruption"
+                  : "caller started speaking"
+              );
             }
 
             return;
           }
 
-          // ==================================================
+          // --------------------------------------------------
           // FINAL
-          // ==================================================
+          // --------------------------------------------------
 
-          call.speechParts.push(
+          call.speechFinalParts.push(
             transcript
           );
 
-          call.lastInterim = "";
+          call.lastInterim =
+            "";
 
           if (
-            data.speech_final
+            message.speech_final
           ) {
 
             const question =
-              call.speechParts
+              call.speechFinalParts
                 .join(" ")
-                .replace(/\s+/g, " ")
+                .replace(
+                  /\s+/g,
+                  " "
+                )
                 .trim();
 
-            call.speechParts = [];
+            call.speechFinalParts =
+              [];
 
-            if (question) {
+            if (
+              question
+            ) {
 
               console.log(
-                `[${call.id}] 🎤 FINAL: ${question}`
+                `[${call.id}] 🎤 FINAL:`,
+                question
               );
 
-              addQuestion(
+              enqueueQuestion(
                 call,
                 question
               );
@@ -1996,7 +2152,7 @@ async function setupDeepgram(call) {
     );
 
     // ========================================================
-    // TTS
+    // TTS MESSAGE
     // ========================================================
 
     tts.on(
@@ -2011,19 +2167,27 @@ async function setupDeepgram(call) {
 
         try {
 
+          // --------------------------------------------------
+          // AUDIO
+          // --------------------------------------------------
+
           if (
             isBinary ||
             Buffer.isBuffer(data)
           ) {
 
             const audio =
-              Buffer.from(data);
+              Buffer.from(
+                data
+              );
 
             if (
-              audio.length > 0 &&
-              call.aiSpeaking
+              audio.length > 0
             ) {
 
+              // IMPORTANT:
+              // Do NOT require aiPlaying here.
+              // Greeting and streamed TTS both need audio.
               call.audioQueue.enqueue(
                 audio
               );
@@ -2031,6 +2195,10 @@ async function setupDeepgram(call) {
 
             return;
           }
+
+          // --------------------------------------------------
+          // JSON
+          // --------------------------------------------------
 
           let message;
 
@@ -2044,6 +2212,26 @@ async function setupDeepgram(call) {
           } catch (_) {
 
             return;
+          }
+
+          if (
+            message.type ===
+            "Flushed"
+          ) {
+
+            console.log(
+              `[${call.id}] TTS FLUSHED`
+            );
+          }
+
+          if (
+            message.type ===
+            "Metadata"
+          ) {
+
+            console.log(
+              `[${call.id}] TTS METADATA`
+            );
           }
 
           if (
@@ -2077,7 +2265,8 @@ async function setupDeepgram(call) {
       "close",
       () => {
 
-        call.sttReady = false;
+        call.sttReady =
+          false;
 
         console.log(
           `[${call.id}] STT CLOSED`
@@ -2089,7 +2278,8 @@ async function setupDeepgram(call) {
       "close",
       () => {
 
-        call.ttsReady = false;
+        call.ttsReady =
+          false;
 
         console.log(
           `[${call.id}] TTS CLOSED`
@@ -2098,7 +2288,7 @@ async function setupDeepgram(call) {
     );
 
     // ========================================================
-    // ERRORS
+    // SOCKET ERROR
     // ========================================================
 
     stt.on(
@@ -2123,13 +2313,236 @@ async function setupDeepgram(call) {
       }
     );
 
+    // ========================================================
+    // KEEPALIVE
+    // ========================================================
+
+    call.sttKeepAlive =
+      setInterval(
+        () => {
+
+          if (
+            call.destroyed ||
+            !call.sttSocket ||
+            call.sttSocket.readyState !==
+              WebSocket.OPEN
+          ) {
+
+            return;
+          }
+
+          try {
+
+            call.sttSocket.send(
+              JSON.stringify({
+                type:
+                  "KeepAlive"
+              })
+            );
+
+          } catch (_) {}
+
+        },
+        8000
+      );
+
+    call.ttsKeepAlive =
+      setInterval(
+        () => {
+
+          if (
+            call.destroyed ||
+            !call.ttsSocket ||
+            call.ttsSocket.readyState !==
+              WebSocket.OPEN
+          ) {
+
+            return;
+          }
+
+          try {
+
+            call.ttsSocket.ping();
+
+          } catch (_) {}
+
+        },
+        20000
+      );
+
+    // ========================================================
+    // FLUSH BUFFERED INBOUND AUDIO
+    // ========================================================
+
+    if (
+      call.pendingInboundAudio.length > 0 &&
+      call.sttSocket.readyState ===
+        WebSocket.OPEN
+    ) {
+
+      console.log(
+        `[${call.id}] 🔄 FLUSHING BUFFERED CALL AUDIO:`,
+        call.pendingInboundAudio.length
+      );
+
+      for (
+        const audio of
+          call.pendingInboundAudio
+      ) {
+
+        try {
+
+          call.sttSocket.send(
+            audio
+          );
+
+        } catch (_) {
+          break;
+        }
+      }
+
+      call.pendingInboundAudio =
+        [];
+
+      call.pendingInboundBytes =
+        0;
+    }
+
+    // ========================================================
+    // GREETING
+    // ========================================================
+
+    await greetCall(
+      call
+    );
+
   } catch (error) {
 
     console.log(
-      `[${call.id}] DEEPGRAM SETUP ERROR:`,
+      `[${call.id}] ❌ DEEPGRAM SETUP ERROR:`,
       error.message
     );
+
+    // Retry once.
+    if (
+      !call.destroyed &&
+      !call.deepgramRetried
+    ) {
+
+      call.deepgramRetried =
+        true;
+
+      console.log(
+        `[${call.id}] Retrying Deepgram...`
+      );
+
+      setTimeout(
+        () => {
+
+          setupDeepgram(
+            call
+          );
+
+        },
+        1000
+      );
+    }
   }
+}
+
+// ============================================================
+// DESTROY CALL
+// ============================================================
+
+function destroyCall(
+  call
+) {
+
+  if (
+    !call ||
+    call.destroyed
+  ) {
+
+    return;
+  }
+
+  console.log(
+    `[${call.id}] 🧹 CLEANING CALL`
+  );
+
+  call.destroyed =
+    true;
+
+  call.aiPlaying =
+    false;
+
+  call.aiGenerating =
+    false;
+
+  call.responseGeneration++;
+
+  call.questionQueue =
+    [];
+
+  call.speechFinalParts =
+    [];
+
+  call.pendingInboundAudio =
+    [];
+
+  if (
+    call.sttKeepAlive
+  ) {
+
+    clearInterval(
+      call.sttKeepAlive
+    );
+
+    call.sttKeepAlive =
+      null;
+  }
+
+  if (
+    call.ttsKeepAlive
+  ) {
+
+    clearInterval(
+      call.ttsKeepAlive
+    );
+
+    call.ttsKeepAlive =
+      null;
+  }
+
+  if (
+    call.audioQueue
+  ) {
+
+    call.audioQueue.stop();
+  }
+
+  closeSocket(
+    call.sttSocket
+  );
+
+  closeSocket(
+    call.ttsSocket
+  );
+
+  call.sttSocket =
+    null;
+
+  call.ttsSocket =
+    null;
+
+  activeCalls.delete(
+    call.id
+  );
+
+  console.log(
+    `[${call.id}] ACTIVE CALLS:`,
+    activeCalls.size
+  );
 }
 
 // ============================================================
@@ -2141,7 +2554,9 @@ wss.on(
   ws => {
 
     const call =
-      createCall(ws);
+      createCall(
+        ws
+      );
 
     activeCalls.set(
       call.id,
@@ -2149,26 +2564,29 @@ wss.on(
     );
 
     console.log(
-      "================================================"
+      "=========================================="
     );
 
     console.log(
-      `[${call.id}] ☎️ EXOTEL CONNECTED`
+      `[${call.id}] 📞 EXOTEL CONNECTED`
     );
 
     console.log(
-      `ACTIVE CALLS: ${activeCalls.size}`
+      `[${call.id}] ACTIVE CALLS:`,
+      activeCalls.size
     );
 
     console.log(
-      "================================================"
+      "=========================================="
     );
 
     // ========================================================
-    // START DEEPGRAM IMMEDIATELY
+    // CONNECT DEEPGRAM IMMEDIATELY
     // ========================================================
 
-    setupDeepgram(call);
+    setupDeepgram(
+      call
+    );
 
     // ========================================================
     // EXOTEL EVENTS
@@ -2204,7 +2622,7 @@ wss.on(
           ) {
 
             console.log(
-              `[${call.id}] EXOTEL STREAM CONNECTED`
+              `[${call.id}] Exotel stream connected`
             );
 
             return;
@@ -2219,6 +2637,9 @@ wss.on(
             "start"
           ) {
 
+            call.started =
+              true;
+
             call.streamSid =
               message.stream_sid ||
               message.start?.stream_sid ||
@@ -2231,14 +2652,38 @@ wss.on(
               null;
 
             console.log(
-              `[${call.id}] CALL START:`,
+              `[${call.id}] 🚀 CALL START`
+            );
+
+            console.log(
+              `[${call.id}] CALL SID:`,
               call.callSid
             );
 
             console.log(
-              `[${call.id}] STREAM:`,
+              `[${call.id}] STREAM SID:`,
               call.streamSid
             );
+
+            console.log(
+              `[${call.id}] MEDIA FORMAT:`,
+              message.start?.media_format
+            );
+
+            // ------------------------------------------------
+            // If TTS already connected, greet now.
+            // Otherwise setupDeepgram will greet once ready.
+            // ------------------------------------------------
+
+            if (
+              call.ttsReady &&
+              !call.greeted
+            ) {
+
+              greetCall(
+                call
+              );
+            }
 
             return;
           }
@@ -2255,16 +2700,9 @@ wss.on(
             const payload =
               message.media?.payload;
 
-            if (!payload) {
-              return;
-            }
-
             if (
-              !call.sttSocket ||
-              call.sttSocket.readyState !==
-                WebSocket.OPEN
+              !payload
             ) {
-
               return;
             }
 
@@ -2274,18 +2712,58 @@ wss.on(
                 "base64"
               );
 
-            try {
+            if (
+              !audio.length
+            ) {
+              return;
+            }
 
-              call.sttSocket.send(
+            // ------------------------------------------------
+            // STT READY
+            // ------------------------------------------------
+
+            if (
+              call.sttSocket &&
+              call.sttSocket.readyState ===
+                WebSocket.OPEN
+            ) {
+
+              try {
+
+                call.sttSocket.send(
+                  audio
+                );
+
+              } catch (error) {
+
+                console.log(
+                  `[${call.id}] STT SEND ERROR:`,
+                  error.message
+                );
+              }
+
+              return;
+            }
+
+            // ------------------------------------------------
+            // STT NOT READY
+            //
+            // BUFFER IT.
+            // DO NOT DROP THE CALLER'S FIRST WORDS.
+            // ------------------------------------------------
+
+            if (
+              call.pendingInboundBytes +
+                audio.length <=
+              call.maxPendingInboundBytes
+            ) {
+
+              call.pendingInboundAudio.push(
                 audio
               );
 
-            } catch (error) {
-
-              console.log(
-                `[${call.id}] AUDIO → STT ERROR:`,
-                error.message
-              );
+              call.pendingInboundBytes +=
+                audio.length;
             }
 
             return;
@@ -2300,9 +2778,11 @@ wss.on(
             "clear"
           ) {
 
-            call.speechParts = [];
+            call.speechFinalParts =
+              [];
 
-            call.lastInterim = "";
+            call.lastInterim =
+              "";
 
             return;
           }
@@ -2315,6 +2795,28 @@ wss.on(
             event ===
             "mark"
           ) {
+
+            console.log(
+              `[${call.id}] Exotel MARK:`,
+              message.mark?.name
+            );
+
+            return;
+          }
+
+          // ==================================================
+          // DTMF
+          // ==================================================
+
+          if (
+            event ===
+            "dtmf"
+          ) {
+
+            console.log(
+              `[${call.id}] DTMF:`,
+              message.dtmf?.digit
+            );
 
             return;
           }
@@ -2329,10 +2831,12 @@ wss.on(
           ) {
 
             console.log(
-              `[${call.id}] EXOTEL STOP`
+              `[${call.id}] 📴 CALL STOP`
             );
 
-            destroyCall(call);
+            destroyCall(
+              call
+            );
 
             return;
           }
@@ -2348,7 +2852,7 @@ wss.on(
     );
 
     // ========================================================
-    // WS CLOSE
+    // WEBSOCKET CLOSE
     // ========================================================
 
     ws.on(
@@ -2356,15 +2860,17 @@ wss.on(
       () => {
 
         console.log(
-          `[${call.id}] EXOTEL DISCONNECTED`
+          `[${call.id}] 📞 EXOTEL DISCONNECTED`
         );
 
-        destroyCall(call);
+        destroyCall(
+          call
+        );
       }
     );
 
     // ========================================================
-    // WS ERROR
+    // WEBSOCKET ERROR
     // ========================================================
 
     ws.on(
@@ -2376,7 +2882,9 @@ wss.on(
           error.message
         );
 
-        destroyCall(call);
+        destroyCall(
+          call
+        );
       }
     );
   }
@@ -2398,7 +2906,7 @@ server.on(
 );
 
 // ============================================================
-// START SERVER
+// START
 // ============================================================
 
 server.listen(
@@ -2407,15 +2915,19 @@ server.listen(
   () => {
 
     console.log(
-      "================================================"
+      ""
     );
 
     console.log(
-      "        H&M AI VOICE ASSISTANT"
+      "=========================================="
     );
 
     console.log(
-      "================================================"
+      "     H&M AI VOICE ASSISTANT"
+    );
+
+    console.log(
+      "=========================================="
     );
 
     console.log(
@@ -2446,7 +2958,20 @@ server.listen(
     );
 
     console.log(
-      "================================================"
+      "Port:",
+      PORT
+    );
+
+    console.log(
+      "=========================================="
+    );
+
+    console.log(
+      "READY FOR CALLS 🚀"
+    );
+
+    console.log(
+      "=========================================="
     );
   }
 );
