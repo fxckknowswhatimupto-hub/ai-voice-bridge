@@ -1,7 +1,7 @@
 {
   "name": "hm-ai-voice-assistant",
   "version": "1.0.0",
-  "description": "H&M AI customer service voice assistant using Exotel, Deepgram and Groq",
+  "description": "H&M AI telephone shopping assistant",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
