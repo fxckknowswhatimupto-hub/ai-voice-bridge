@@ -1,7 +1,7 @@
 {
-  "name": "hm-human-voice-assistant",
+  "name": "hm-ai-voice-assistant",
   "version": "1.0.0",
-  "private": true,
+  "description": "H&M AI customer service voice assistant using Exotel, Deepgram and Groq",
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
@@ -10,7 +10,7 @@
     "node": ">=20"
   },
   "dependencies": {
-    "groq-sdk": "^0.20.0",
+    "groq-sdk": "^0.37.0",
     "ws": "^8.18.0"
   }
 }
