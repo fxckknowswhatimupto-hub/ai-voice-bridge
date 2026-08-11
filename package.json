@@ -1,13 +1,16 @@
 {
-  "name": "ai-voice-bridge",
+  "name": "hm-human-voice-assistant",
   "version": "1.0.0",
-  "description": "Exotel voice AI bridge using Deepgram and Groq",
+  "private": true,
   "main": "server.js",
   "scripts": {
     "start": "node server.js"
   },
+  "engines": {
+    "node": ">=20"
+  },
   "dependencies": {
-    "groq-sdk": "^0.37.0",
+    "groq-sdk": "^0.20.0",
     "ws": "^8.18.0"
   }
 }
