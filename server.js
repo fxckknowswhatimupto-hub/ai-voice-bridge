@@ -5,7 +5,7 @@ const WebSocket = require("ws");
 const Groq = require("groq-sdk");
 
 // ============================================================
-// CONFIGURATION
+// CONFIG
 // ============================================================
 
 const PORT = Number(process.env.PORT || 10000);
@@ -14,35 +14,36 @@ const GROQ_API_KEY = process.env.GROQ_API_KEY;
 const DEEPGRAM_API_KEY = process.env.DEEPGRAM_API_KEY;
 
 if (!GROQ_API_KEY) {
-  console.error("CRITICAL: GROQ_API_KEY is missing");
+  console.error("CRITICAL ERROR: GROQ_API_KEY is missing.");
   process.exit(1);
 }
 
 if (!DEEPGRAM_API_KEY) {
-  console.error("CRITICAL: DEEPGRAM_API_KEY is missing");
+  console.error("CRITICAL ERROR: DEEPGRAM_API_KEY is missing.");
   process.exit(1);
 }
 
 const GROQ_MODEL =
-  process.env.GROQ_MODEL ||
-  "llama-3.1-8b-instant";
+  process.env.GROQ_MODEL || "llama-3.1-8b-instant";
 
-const DEEPGRAM_STT_MODEL =
-  process.env.DEEPGRAM_STT_MODEL ||
-  "nova-2-phonecall";
+// Primary phone-call model
+const DEEPGRAM_PRIMARY_STT =
+  process.env.DEEPGRAM_STT_MODEL || "nova-2-phonecall";
+
+// Fallback model
+const DEEPGRAM_FALLBACK_STT =
+  process.env.DEEPGRAM_FALLBACK_STT_MODEL || "nova-3";
 
 const DEEPGRAM_TTS_MODEL =
-  process.env.DEEPGRAM_TTS_MODEL ||
-  "aura-2-thalia-en";
+  process.env.DEEPGRAM_TTS_MODEL || "aura-2-thalia-en";
 
-const STT_SAMPLE_RATE = 8000;
-const TTS_SAMPLE_RATE = 8000;
+const SAMPLE_RATE = 8000;
 
 const groq = new Groq({
   apiKey: GROQ_API_KEY
 });
 
-let callCounter = 1;
+let callNumber = 1;
 
 const activeCalls = new Map();
 
@@ -198,6 +199,7 @@ const PRODUCTS = [
 const CUSTOMERS = [
   {
     phone: "8667859535",
+
     name: "Syed",
 
     loyaltyPoints: 450,
@@ -208,8 +210,7 @@ const CUSTOMERS = [
     cart: [
       {
         productId: "HM-TSH-102",
-        product:
-          "Oversized Cotton T-Shirt",
+        product: "Oversized Cotton T-Shirt",
         color: "black",
         size: "L",
         quantity: 1
@@ -223,15 +224,19 @@ const CUSTOMERS = [
         product:
           "Bootcut High Waist Jeans",
 
-        color: "dark blue",
+        color:
+          "dark blue",
 
-        size: "32",
+        size:
+          "32",
 
         quantity: 1,
 
-        status: "Shipped",
+        status:
+          "Shipped",
 
-        courier: "BlueDart",
+        courier:
+          "BlueDart",
 
         tracking:
           "IN-HM-928371",
@@ -244,6 +249,7 @@ const CUSTOMERS = [
 
   {
     phone: "9876543210",
+
     name: "Alex",
 
     loyaltyPoints: 180,
@@ -258,7 +264,7 @@ const CUSTOMERS = [
 ];
 
 // ============================================================
-// TEXT HELPERS
+// HELPERS
 // ============================================================
 
 function normalizeText(text) {
@@ -278,21 +284,15 @@ function normalizePhone(phone) {
     String(phone).replace(/\D/g, "");
 
   if (digits.startsWith("91")) {
-    digits =
-      digits.slice(-10);
+    digits = digits.slice(-10);
   }
 
   if (digits.length > 10) {
-    digits =
-      digits.slice(-10);
+    digits = digits.slice(-10);
   }
 
   return digits;
 }
-
-// ============================================================
-// CUSTOMER LOOKUP
-// ============================================================
 
 function findCustomer(phone) {
   const normalized =
@@ -306,10 +306,6 @@ function findCustomer(phone) {
     ) || null
   );
 }
-
-// ============================================================
-// PRODUCT HELPERS
-// ============================================================
 
 function searchProducts(text) {
   const q =
@@ -362,11 +358,7 @@ function detectColor(text) {
 
   for (const product of PRODUCTS) {
     for (const color of product.colors) {
-      if (
-        q.includes(
-          normalizeText(color)
-        )
-      ) {
+      if (q.includes(color)) {
         return color;
       }
     }
@@ -402,31 +394,45 @@ function detectSize(text) {
   const q =
     normalizeText(text);
 
+  const mappings = {
+    small: "S",
+    medium: "M",
+    large: "L",
+    "extra large": "XL",
+    "extra small": "XS",
+    "extra extra large": "XXL"
+  };
+
+  for (const key of Object.keys(mappings)) {
+    if (q.includes(key)) {
+      return mappings[key];
+    }
+  }
+
   const sizes = [
-    "xxl",
-    "xl",
-    "xs",
+    "XXL",
+    "XL",
+    "XS",
     "36",
     "34",
     "32",
     "30",
     "28",
-    "small",
-    "medium",
-    "large"
+    "S",
+    "M",
+    "L"
   ];
 
   for (const size of sizes) {
-    if (
+    const regex =
       new RegExp(
-        `(^|\\s)${size}($|\\s)`
-      ).test(q)
-    ) {
-      if (size === "small") return "S";
-      if (size === "medium") return "M";
-      if (size === "large") return "L";
+        `(^|\\s)${size.toLowerCase()}($|\\s)`
+      );
 
-      return size.toUpperCase();
+    if (
+      regex.test(q)
+    ) {
+      return size;
     }
   }
 
@@ -434,7 +440,7 @@ function detectSize(text) {
 }
 
 // ============================================================
-// CART OPERATIONS
+// CART
 // ============================================================
 
 function addToCart(
@@ -442,7 +448,7 @@ function addToCart(
   product,
   color,
   size,
-  quantity = 1
+  quantity
 ) {
   if (!customer) {
     return false;
@@ -482,13 +488,10 @@ function removeFromCart(
   const index =
     customer.cart.findIndex(
       item =>
-        normalizeText(
-          item.product
-        ).includes(
-          normalizeText(
-            productName
+        normalizeText(item.product)
+          .includes(
+            normalizeText(productName)
           )
-        )
     );
 
   if (index === -1) {
@@ -540,9 +543,7 @@ function createAudioQueue(call) {
 
             media: {
               payload:
-                chunk.toString(
-                  "base64"
-                )
+                chunk.toString("base64")
             }
           })
         );
@@ -600,12 +601,16 @@ function createAudioQueue(call) {
 }
 
 // ============================================================
-// DEEPGRAM CONNECTION
+// DEEPGRAM WEBSOCKET CONNECTION
 // ============================================================
 
-function connectDeepgram(url) {
+function openDeepgramSocket(
+  url
+) {
   return new Promise(
     (resolve, reject) => {
+      let settled = false;
+
       const socket =
         new WebSocket(
           url,
@@ -617,12 +622,10 @@ function connectDeepgram(url) {
           }
         );
 
-      let opened = false;
-
       socket.once(
         "open",
         () => {
-          opened = true;
+          settled = true;
           resolve(socket);
         }
       );
@@ -646,11 +649,15 @@ function connectDeepgram(url) {
           response.on(
             "end",
             () => {
-              reject(
-                new Error(
-                  `Deepgram HTTP ${response.statusCode}: ${body}`
-                )
-              );
+              if (!settled) {
+                settled = true;
+
+                reject(
+                  new Error(
+                    `Deepgram HTTP ${response.statusCode}: ${body || "No response body"}`
+                  )
+                );
+              }
             }
           );
         }
@@ -659,7 +666,8 @@ function connectDeepgram(url) {
       socket.once(
         "error",
         error => {
-          if (!opened) {
+          if (!settled) {
+            settled = true;
             reject(error);
           }
         }
@@ -668,10 +676,12 @@ function connectDeepgram(url) {
       socket.once(
         "close",
         () => {
-          if (!opened) {
+          if (!settled) {
+            settled = true;
+
             reject(
               new Error(
-                "Deepgram closed before opening"
+                "Deepgram WebSocket closed before opening"
               )
             );
           }
@@ -682,184 +692,289 @@ function connectDeepgram(url) {
 }
 
 // ============================================================
-// STT
+// STT URL
 // ============================================================
 
-async function connectSTT(call) {
-  const url =
+function buildSTTUrl(
+  model
+) {
+  /*
+   * IMPORTANT:
+   *
+   * Exotel sends:
+   * raw/slin
+   * 16-bit
+   * 8000 Hz
+   * mono
+   * little-endian PCM
+   *
+   * Deepgram's raw Linear16 configuration
+   * therefore uses encoding=linear16 and
+   * sample_rate=8000.
+   */
+
+  return (
     "wss://api.deepgram.com/v1/listen" +
-    `?model=${encodeURIComponent(
-      DEEPGRAM_STT_MODEL
-    )}` +
+    `?model=${encodeURIComponent(model)}` +
+    "&language=en-US" +
     "&encoding=linear16" +
     "&sample_rate=8000" +
     "&channels=1" +
     "&interim_results=true" +
-    "&smart_format=true" +
-    "&punctuate=true" +
-    "&endpointing=300" +
-    "&utterance_end_ms=800";
-
-  console.log(
-    `[${call.id}] Connecting Deepgram STT`
+    "&endpointing=300"
   );
-
-  console.log(
-    `[${call.id}] STT URL MODEL: ${DEEPGRAM_STT_MODEL}`
-  );
-
-  const socket =
-    await connectDeepgram(
-      url
-    );
-
-  console.log(
-    `[${call.id}] Deepgram STT connected`
-  );
-
-  socket.on(
-    "message",
-    raw => {
-      if (call.destroyed) {
-        return;
-      }
-
-      let message;
-
-      try {
-        message =
-          JSON.parse(
-            raw.toString()
-          );
-      } catch {
-        return;
-      }
-
-      if (
-        message.type ===
-        "SpeechStarted"
-      ) {
-        if (
-          call.aiSpeaking
-        ) {
-          interruptAI(
-            call
-          );
-        }
-
-        return;
-      }
-
-      const transcript =
-        message
-          ?.channel
-          ?.alternatives?.[0]
-          ?.transcript || "";
-
-      if (!transcript) {
-        return;
-      }
-
-      const clean =
-        transcript
-          .replace(
-            /\s+/g,
-            " "
-          )
-          .trim();
-
-      if (
-        message.is_final !==
-        true
-      ) {
-        call.lastInterim =
-          clean;
-
-        if (
-          call.aiSpeaking &&
-          clean.length >= 3
-        ) {
-          interruptAI(
-            call
-          );
-        }
-
-        return;
-      }
-
-      call.finalParts.push(
-        clean
-      );
-
-      if (
-        message.speech_final !==
-        true
-      ) {
-        return;
-      }
-
-      const question =
-        call.finalParts
-          .join(" ")
-          .replace(
-            /\s+/g,
-            " "
-          )
-          .trim();
-
-      call.finalParts = [];
-
-      call.lastInterim = "";
-
-      if (!question) {
-        return;
-      }
-
-      console.log(
-        `[${call.id}] CUSTOMER: ${question}`
-      );
-
-      handleCustomerSpeech(
-        call,
-        question
-      );
-    }
-  );
-
-  socket.on(
-    "error",
-    error => {
-      console.error(
-        `[${call.id}] STT ERROR:`,
-        error.message
-      );
-    }
-  );
-
-  socket.on(
-    "close",
-    (code, reason) => {
-      call.sttReady =
-        false;
-
-      if (!call.destroyed) {
-        console.log(
-          `[${call.id}] STT CLOSED:`,
-          code,
-          reason?.toString() || ""
-        );
-      }
-    }
-  );
-
-  return socket;
 }
 
 // ============================================================
-// TTS
+// CONNECT STT
 // ============================================================
 
-async function connectTTS(call) {
+async function connectSTT(
+  call
+) {
+  let lastError = null;
+
+  const models = [
+    DEEPGRAM_PRIMARY_STT,
+    DEEPGRAM_FALLBACK_STT
+  ];
+
+  for (
+    let i = 0;
+    i < models.length;
+    i++
+  ) {
+    const model =
+      models[i];
+
+    if (
+      i > 0 &&
+      model === models[i - 1]
+    ) {
+      continue;
+    }
+
+    const url =
+      buildSTTUrl(
+        model
+      );
+
+    console.log(
+      `[${call.id}] Connecting Deepgram STT: ${model}`
+    );
+
+    console.log(
+      `[${call.id}] STT URL: ${url}`
+    );
+
+    try {
+      const socket =
+        await openDeepgramSocket(
+          url
+        );
+
+      console.log(
+        `[${call.id}] Deepgram STT connected using ${model}`
+      );
+
+      call.sttModel =
+        model;
+
+      socket.on(
+        "message",
+        raw => {
+          if (
+            call.destroyed
+          ) {
+            return;
+          }
+
+          let msg;
+
+          try {
+            msg =
+              JSON.parse(
+                raw.toString()
+              );
+          } catch {
+            return;
+          }
+
+          if (
+            msg.type ===
+            "Metadata"
+          ) {
+            return;
+          }
+
+          if (
+            msg.type ===
+            "SpeechStarted"
+          ) {
+            if (
+              call.aiSpeaking
+            ) {
+              interruptAI(
+                call
+              );
+            }
+
+            return;
+          }
+
+          const transcript =
+            msg
+              ?.channel
+              ?.alternatives?.[0]
+              ?.transcript || "";
+
+          if (!transcript) {
+            return;
+          }
+
+          const clean =
+            transcript
+              .replace(
+                /\s+/g,
+                " "
+              )
+              .trim();
+
+          // Interim transcript
+          if (
+            msg.is_final !== true
+          ) {
+            call.lastInterim =
+              clean;
+
+            if (
+              call.aiSpeaking &&
+              clean.length >= 3
+            ) {
+              interruptAI(
+                call
+              );
+            }
+
+            return;
+          }
+
+          // Final transcript segment
+          call.finalParts.push(
+            clean
+          );
+
+          /*
+           * Deepgram can send several is_final
+           * segments before speech_final.
+           *
+           * We concatenate them.
+           */
+
+          if (
+            msg.speech_final !==
+            true
+          ) {
+            return;
+          }
+
+          const fullText =
+            call.finalParts
+              .join(" ")
+              .replace(
+                /\s+/g,
+                " "
+              )
+              .trim();
+
+          call.finalParts = [];
+
+          call.lastInterim =
+            "";
+
+          if (!fullText) {
+            return;
+          }
+
+          console.log(
+            `[${call.id}] CUSTOMER: ${fullText}`
+          );
+
+          handleCustomerSpeech(
+            call,
+            fullText
+          );
+        }
+      );
+
+      socket.on(
+        "error",
+        error => {
+          console.error(
+            `[${call.id}] STT SOCKET ERROR:`,
+            error.message
+          );
+        }
+      );
+
+      socket.on(
+        "close",
+        (code, reason) => {
+          call.sttReady =
+            false;
+
+          if (
+            !call.destroyed
+          ) {
+            console.log(
+              `[${call.id}] STT CLOSED: ${code} ${reason?.toString() || ""}`
+            );
+          }
+        }
+      );
+
+      return socket;
+
+    } catch (error) {
+      lastError =
+        error;
+
+      console.error(
+        `[${call.id}] STT MODEL ${model} FAILED:`,
+        error.message
+      );
+
+      /*
+       * Try the fallback model rather than
+       * immediately killing the call.
+       */
+    }
+  }
+
+  throw (
+    lastError ||
+    new Error(
+      "All Deepgram STT models failed"
+    )
+  );
+}
+
+// ============================================================
+// CONNECT TTS
+// ============================================================
+
+async function connectTTS(
+  call
+) {
+  /*
+   * Deepgram v1 streaming TTS.
+   *
+   * IMPORTANT:
+   * Do not add container=none here.
+   * The current v1 streaming TTS endpoint
+   * already emits raw streaming audio.
+   */
+
   const url =
     "wss://api.deepgram.com/v1/speak" +
     `?model=${encodeURIComponent(
@@ -867,15 +982,18 @@ async function connectTTS(call) {
     )}` +
     "&encoding=linear16" +
     "&sample_rate=8000" +
-    "&container=none" +
     "&speed=1.08";
 
   console.log(
     `[${call.id}] Connecting Deepgram TTS`
   );
 
+  console.log(
+    `[${call.id}] TTS URL: ${url}`
+  );
+
   const socket =
-    await connectDeepgram(
+    await openDeepgramSocket(
       url
     );
 
@@ -907,10 +1025,10 @@ async function connectTTS(call) {
         return;
       }
 
-      let message;
+      let msg;
 
       try {
-        message =
+        msg =
           JSON.parse(
             data.toString()
           );
@@ -919,14 +1037,14 @@ async function connectTTS(call) {
       }
 
       if (
-        message.type ===
+        msg.type ===
         "Warning"
       ) {
         console.log(
           `[${call.id}] TTS WARNING:`,
-          message.description ||
-            message.code ||
-            "unknown"
+          msg.description ||
+            msg.code ||
+            "Unknown"
         );
       }
     }
@@ -936,7 +1054,7 @@ async function connectTTS(call) {
     "error",
     error => {
       console.error(
-        `[${call.id}] TTS ERROR:`,
+        `[${call.id}] TTS SOCKET ERROR:`,
         error.message
       );
     }
@@ -948,11 +1066,11 @@ async function connectTTS(call) {
       call.ttsReady =
         false;
 
-      if (!call.destroyed) {
+      if (
+        !call.destroyed
+      ) {
         console.log(
-          `[${call.id}] TTS CLOSED:`,
-          code,
-          reason?.toString() || ""
+          `[${call.id}] TTS CLOSED: ${code} ${reason?.toString() || ""}`
         );
       }
     }
@@ -965,8 +1083,12 @@ async function connectTTS(call) {
 // DEEPGRAM KEEPALIVE
 // ============================================================
 
-function startKeepAlive(call) {
-  if (call.keepAliveTimer) {
+function startKeepAlive(
+  call
+) {
+  if (
+    call.keepAliveTimer
+  ) {
     clearInterval(
       call.keepAliveTimer
     );
@@ -1001,16 +1123,20 @@ function startKeepAlive(call) {
 }
 
 // ============================================================
-// INTERRUPT / BARGE-IN
+// INTERRUPT AI
 // ============================================================
 
-function interruptAI(call) {
-  if (!call.aiSpeaking) {
+function interruptAI(
+  call
+) {
+  if (
+    !call.aiSpeaking
+  ) {
     return;
   }
 
   console.log(
-    `[${call.id}] BARGE-IN`
+    `[${call.id}] BARGE-IN DETECTED`
   );
 
   call.responseGeneration++;
@@ -1055,34 +1181,38 @@ function interruptAI(call) {
 // SYSTEM PROMPT
 // ============================================================
 
-function buildSystemPrompt(call) {
-  const customer =
-    call.customer;
-
+function buildSystemPrompt(
+  call
+) {
   return `
-You are the H&M phone customer assistant.
+You are an H&M customer service phone assistant.
 
-You sound like a relaxed, friendly, genuinely helpful human customer-service employee.
+Your personality is relaxed, friendly, warm and natural.
 
-Never sound robotic.
+You should sound like an experienced human retail employee.
 
-Never mention that you are an AI.
+Do not sound robotic.
 
-Keep phone responses short and natural.
+Do not mention that you are an AI.
 
-Use casual natural phrases when appropriate:
+Do not give huge explanations.
+
+Phone conversations should be concise.
+
+Use natural conversational language such as:
+
 "Sure."
 "Yeah, absolutely."
 "Got it."
 "No problem."
-"Yep, let me check that."
-"Sure, I can help with that."
+"Let me check that."
+"Yep, I can help with that."
 
-Do not overuse them.
+Do not repeat these phrases unnecessarily.
 
 CUSTOMER:
 ${JSON.stringify(
-  customer || {
+  call.customer || {
     name: "Guest"
   }
 )}
@@ -1090,60 +1220,67 @@ ${JSON.stringify(
 PRODUCT DATABASE:
 ${JSON.stringify(PRODUCTS)}
 
-CART:
+CURRENT CART:
 ${JSON.stringify(
-  customer?.cart || []
+  call.customer?.cart || []
 )}
 
 ORDERS:
 ${JSON.stringify(
-  customer?.orders || []
+  call.customer?.orders || []
 )}
+
+LOYALTY POINTS:
+${call.customer?.loyaltyPoints || 0}
 
 You can help with:
 
-- finding products
-- dresses
-- jeans
-- shirts
-- hoodies
-- colors
-- sizes
-- materials
-- prices
-- stock
-- product descriptions
-- adding products to cart
-- removing products
-- replacing cart products
-- changing size
-- changing color
-- quantities
-- order status
-- tracking
-- courier information
-- estimated delivery
-- loyalty points
-- customer information
-- general H&M shopping assistance
+product search
+colors
+sizes
+materials
+prices
+stock
+product descriptions
+adding products to cart
+removing products from cart
+replacing cart products
+changing size
+changing color
+changing quantity
+order status
+tracking
+courier information
+estimated delivery
+loyalty points
+customer information
+general shopping questions
 
-SPECIFIC PRODUCT REQUIREMENTS:
+SPECIFIC SEARCH:
 
-If the customer asks for a very specific color, size or material, respect that requirement.
+If a customer requests a very specific combination of:
+
+color + size + material
+
+you must check the database carefully.
 
 Example:
 
 "I want a black dress in medium."
 
-Find a dress that supports black and M.
+Look for a dress supporting black and M.
 
-If it exists, say so.
+Example:
 
-If it doesn't, suggest the closest available option.
+"I want a cotton shirt in beige."
 
-IMPORTANT SPEECH RECOGNITION:
+Look for a shirt supporting cotton and beige.
 
-Phone speech recognition may confuse:
+If an exact match does not exist, clearly explain that and offer the closest available option.
+
+SPEECH RECOGNITION:
+
+Telephone speech recognition can confuse:
 
 "a dress"
 
@@ -1151,7 +1288,7 @@ with:
 
 "address"
 
-If the conversation is about clothing, interpret "address" as "a dress" when that makes contextual sense.
+If the context is fashion/clothing, interpret "address" as "a dress" when that clearly makes sense.
 
 Do not unnecessarily ask the customer to repeat themselves.
 
@@ -1167,33 +1304,36 @@ If the customer says:
 "goodbye"
 "that's everything"
 
-do NOT immediately terminate.
-
-Ask:
+ask:
 
 "Just to confirm, would you like me to end the call?"
 
-Only terminate after the customer confirms.
+Do not terminate immediately.
 
-PHONE STYLE:
+Only end after confirmation.
 
-Never give long paragraphs.
+IMPORTANT:
 
-Normally answer in one to three short sentences.
+Never say:
 
-Do not use markdown.
+"Sorry, I had trouble there"
 
-Do not use bullet points while speaking.
+unless the speech genuinely cannot be understood.
 
-Do not repeatedly say:
-"Sorry, I had trouble there."
+Do not repeatedly ask the customer to repeat themselves.
 
-Only ask the customer to repeat themselves if the speech genuinely cannot be understood.
+Keep answers short enough for a phone conversation.
+
+No markdown.
+
+No bullet lists.
+
+No long paragraphs.
 `;
 }
 
 // ============================================================
-// CONTEXT ENRICHMENT
+// CONTEXT
 // ============================================================
 
 function enrichCustomerText(
@@ -1214,7 +1354,9 @@ function enrichCustomerText(
 
   const hints = [];
 
-  if (products.length) {
+  if (
+    products.length
+  ) {
     hints.push(
       "Relevant products: " +
       products
@@ -1246,17 +1388,19 @@ function enrichCustomerText(
   }
 
   return (
-    `${text}\n\n` +
-    `INTERNAL SHOPPING CONTEXT:\n` +
+    text +
+    "\n\nINTERNAL CONTEXT:\n" +
     hints.join("\n")
   );
 }
 
 // ============================================================
-// NATURAL RESPONSE CLEANUP
+// SPEECH CLEANUP
 // ============================================================
 
-function cleanForSpeech(text) {
+function cleanForSpeech(
+  text
+) {
   return String(text || "")
     .replace(
       /\*\*/g,
@@ -1274,7 +1418,7 @@ function cleanForSpeech(text) {
 }
 
 // ============================================================
-// GROQ + STREAMING TTS
+// GROQ RESPONSE
 // ============================================================
 
 async function generateResponse(
@@ -1318,17 +1462,22 @@ async function generateResponse(
             ...call.history
           ],
 
-          temperature: 0.55,
+          temperature:
+            0.55,
 
-          max_tokens: 180,
+          max_tokens:
+            180,
 
-          stream: true
+          stream:
+            true
         }
       );
 
-    let fullResponse = "";
+    let fullResponse =
+      "";
 
-    let buffer = "";
+    let sentenceBuffer =
+      "";
 
     for await (
       const chunk of stream
@@ -1351,53 +1500,54 @@ async function generateResponse(
         continue;
       }
 
-      fullResponse += token;
+      fullResponse +=
+        token;
 
-      buffer += token;
+      sentenceBuffer +=
+        token;
 
       /*
-       * Do not wait for the entire LLM response.
-       * Start TTS as soon as a natural speech
-       * segment exists.
+       * Start TTS quickly instead of waiting
+       * for the entire Groq response.
        */
 
-      const sentenceMatch =
-        buffer.match(
+      const match =
+        sentenceBuffer.match(
           /^([\s\S]*?[.!?])\s+/
         );
 
       if (
-        sentenceMatch ||
-        buffer.length >= 100
+        match ||
+        sentenceBuffer.length >= 100
       ) {
-        let speakText;
+        let textToSpeak =
+          "";
 
-        if (sentenceMatch) {
-          speakText =
-            sentenceMatch[1];
+        if (match) {
+          textToSpeak =
+            match[1];
 
-          buffer =
-            buffer.slice(
-              sentenceMatch[0]
-                .length
+          sentenceBuffer =
+            sentenceBuffer.slice(
+              match[0].length
             );
         } else {
           const split =
-            buffer.lastIndexOf(
+            sentenceBuffer.lastIndexOf(
               " "
             );
 
           if (
             split > 30
           ) {
-            speakText =
-              buffer.slice(
+            textToSpeak =
+              sentenceBuffer.slice(
                 0,
                 split
               );
 
-            buffer =
-              buffer.slice(
+            sentenceBuffer =
+              sentenceBuffer.slice(
                 split + 1
               );
           } else {
@@ -1405,13 +1555,13 @@ async function generateResponse(
           }
         }
 
-        speakText =
+        textToSpeak =
           cleanForSpeech(
-            speakText
+            textToSpeak
           );
 
         if (
-          speakText &&
+          textToSpeak &&
           call.ttsSocket &&
           call.ttsSocket.readyState ===
             WebSocket.OPEN &&
@@ -1421,7 +1571,7 @@ async function generateResponse(
           call.ttsSocket.send(
             JSON.stringify({
               type: "Speak",
-              text: speakText
+              text: textToSpeak
             })
           );
         }
@@ -1435,13 +1585,13 @@ async function generateResponse(
       return;
     }
 
-    buffer =
+    const remaining =
       cleanForSpeech(
-        buffer
+        sentenceBuffer
       );
 
     if (
-      buffer &&
+      remaining &&
       call.ttsSocket &&
       call.ttsSocket.readyState ===
         WebSocket.OPEN
@@ -1449,7 +1599,7 @@ async function generateResponse(
       call.ttsSocket.send(
         JSON.stringify({
           type: "Speak",
-          text: buffer
+          text: remaining
         })
       );
     }
@@ -1492,7 +1642,7 @@ async function generateResponse(
           JSON.stringify({
             type: "Speak",
             text:
-              "Sorry, give me just a second."
+              "Give me just a second."
           })
         );
 
@@ -1555,11 +1705,15 @@ async function handleCustomerSpeech(
 // GREETING
 // ============================================================
 
-function sendGreeting(call) {
+function sendGreeting(
+  call
+) {
   if (
     call.destroyed ||
     call.greetingSent ||
-    !call.ttsReady ||
+    !call.ttsSocket ||
+    call.ttsSocket.readyState !==
+      WebSocket.OPEN ||
     !call.streamSid
   ) {
     return;
@@ -1573,7 +1727,7 @@ function sendGreeting(call) {
     "there";
 
   const greeting =
-    `Hi ${name}, welcome to H and M. I can help you find products, check colors, sizes and materials, manage your cart, check orders and tracking, and help with anything else you're shopping for. What would you like to purchase today?`;
+    `Hi ${name}, welcome to H and M. How can I help you today?`;
 
   console.log(
     `[${call.id}] GREETING: ${greeting}`
@@ -1610,51 +1764,74 @@ function sendGreeting(call) {
 }
 
 // ============================================================
-// CALL SESSION
+// CREATE CALL
 // ============================================================
 
-function createCallSession(ws) {
+function createCall(
+  ws
+) {
   const call = {
     id:
-      `CALL-${callCounter++}`,
+      `CALL-${callNumber++}`,
 
     ws,
 
-    streamSid: null,
+    streamSid:
+      null,
 
-    callSid: null,
+    callSid:
+      null,
 
-    phoneNumber: null,
+    phoneNumber:
+      null,
 
-    customer: null,
+    customer:
+      null,
 
-    sttSocket: null,
+    sttSocket:
+      null,
 
-    ttsSocket: null,
+    ttsSocket:
+      null,
 
-    sttReady: false,
+    sttReady:
+      false,
 
-    ttsReady: false,
+    ttsReady:
+      false,
 
-    greetingSent: false,
+    sttModel:
+      null,
 
-    aiSpeaking: false,
+    greetingSent:
+      false,
 
-    destroyed: false,
+    aiSpeaking:
+      false,
 
-    responseGeneration: 0,
+    destroyed:
+      false,
 
-    lastProcessedText: "",
+    responseGeneration:
+      0,
 
-    lastInterim: "",
+    lastProcessedText:
+      "",
 
-    finalParts: [],
+    lastInterim:
+      "",
 
-    keepAliveTimer: null,
+    finalParts:
+      [],
 
-    audioQueue: null,
+    keepAliveTimer:
+      null,
 
-    history: []
+    audioQueue:
+      null,
+
+    history:
+      []
   };
 
   call.audioQueue =
@@ -1669,7 +1846,9 @@ function createCallSession(ws) {
 // CLEANUP
 // ============================================================
 
-function destroyCall(call) {
+function destroyCall(
+  call
+) {
   if (
     !call ||
     call.destroyed
@@ -1722,9 +1901,6 @@ function destroyCall(call) {
     }
   } catch {}
 
-  call.sttSocket = null;
-  call.ttsSocket = null;
-
   activeCalls.delete(
     call.id
   );
@@ -1755,13 +1931,23 @@ const server =
 
         res.end(
           JSON.stringify({
-            status: "ok",
+            status:
+              "ok",
+
             activeCalls:
               activeCalls.size,
-            stt:
-              DEEPGRAM_STT_MODEL,
+
+            primarySTT:
+              DEEPGRAM_PRIMARY_STT,
+
+            fallbackSTT:
+              DEEPGRAM_FALLBACK_STT,
+
             tts:
-              DEEPGRAM_TTS_MODEL
+              DEEPGRAM_TTS_MODEL,
+
+            groq:
+              GROQ_MODEL
           })
         );
 
@@ -1779,7 +1965,7 @@ const server =
   );
 
 // ============================================================
-// EXOTEL WEBSOCKET SERVER
+// WEBSOCKET SERVER
 // ============================================================
 
 const wss =
@@ -1791,7 +1977,7 @@ wss.on(
   "connection",
   ws => {
     const call =
-      createCallSession(
+      createCall(
         ws
       );
 
@@ -1809,8 +1995,7 @@ wss.on(
     );
 
     console.log(
-      `[${call.id}] ACTIVE CALLS:`,
-      activeCalls.size
+      `[${call.id}] ACTIVE CALLS: ${activeCalls.size}`
     );
 
     console.log(
@@ -1835,7 +2020,7 @@ wss.on(
             );
         } catch {
           console.error(
-            `[${call.id}] INVALID EXOTEL MESSAGE`
+            `[${call.id}] INVALID JSON FROM EXOTEL`
           );
 
           return;
@@ -1844,9 +2029,9 @@ wss.on(
         const event =
           message.event;
 
-        // ------------------------------------------------------
+        // ======================================================
         // CONNECTED
-        // ------------------------------------------------------
+        // ======================================================
 
         if (
           event ===
@@ -1859,9 +2044,9 @@ wss.on(
           return;
         }
 
-        // ------------------------------------------------------
+        // ======================================================
         // START
-        // ------------------------------------------------------
+        // ======================================================
 
         if (
           event ===
@@ -1870,18 +2055,14 @@ wss.on(
           call.streamSid =
             message.stream_sid ||
             message.start?.stream_sid ||
-            message.start?.streamSid ||
             null;
 
           call.callSid =
             message.start?.call_sid ||
-            message.start?.callSid ||
             null;
 
           call.phoneNumber =
             message.start?.from ||
-            message.start?.caller_number ||
-            message.start?.phone_number ||
             null;
 
           call.customer =
@@ -1908,13 +2089,19 @@ wss.on(
             }`
           );
 
+          // Log exactly what Exotel says the audio is
+          console.log(
+            `[${call.id}] EXOTEL MEDIA FORMAT:`,
+            JSON.stringify(
+              message.start?.media_format ||
+                {}
+            )
+          );
+
           try {
-            /*
-             * IMPORTANT:
-             *
-             * Deepgram is connected only AFTER
-             * Exotel's start event.
-             */
+            // --------------------------------------------------
+            // STT
+            // --------------------------------------------------
 
             call.sttSocket =
               await connectSTT(
@@ -1923,6 +2110,10 @@ wss.on(
 
             call.sttReady =
               true;
+
+            // --------------------------------------------------
+            // TTS
+            // --------------------------------------------------
 
             call.ttsSocket =
               await connectTTS(
@@ -1933,12 +2124,16 @@ wss.on(
               true;
 
             console.log(
-              `[${call.id}] DEEPGRAM READY`
+              `[${call.id}] DEEPGRAM STT + TTS READY`
             );
 
             startKeepAlive(
               call
             );
+
+            // --------------------------------------------------
+            // GREETING
+            // --------------------------------------------------
 
             sendGreeting(
               call
@@ -1953,13 +2148,6 @@ wss.on(
               error.message
             );
 
-            /*
-             * This is deliberately not hidden.
-             * If Deepgram rejects the WebSocket,
-             * Render will show the actual HTTP
-             * status and body.
-             */
-
             destroyCall(
               call
             );
@@ -1968,9 +2156,9 @@ wss.on(
           return;
         }
 
-        // ------------------------------------------------------
+        // ======================================================
         // MEDIA
-        // ------------------------------------------------------
+        // ======================================================
 
         if (
           event ===
@@ -1998,12 +2186,18 @@ wss.on(
                 "base64"
               );
 
+            /*
+             * Exotel Voicebot sends raw/slin
+             * 16-bit 8kHz mono PCM.
+             */
+
             call.sttSocket.send(
               audio
             );
+
           } catch (error) {
             console.error(
-              `[${call.id}] AUDIO TO STT ERROR:`,
+              `[${call.id}] AUDIO → STT ERROR:`,
               error.message
             );
           }
@@ -2011,9 +2205,38 @@ wss.on(
           return;
         }
 
-        // ------------------------------------------------------
+        // ======================================================
+        // CLEAR
+        // ======================================================
+
+        if (
+          event ===
+          "clear"
+        ) {
+          call.audioQueue.clear();
+
+          return;
+        }
+
+        // ======================================================
+        // DTMF
+        // ======================================================
+
+        if (
+          event ===
+          "dtmf"
+        ) {
+          console.log(
+            `[${call.id}] DTMF:`,
+            message.dtmf?.digit
+          );
+
+          return;
+        }
+
+        // ======================================================
         // STOP
-        // ------------------------------------------------------
+        // ======================================================
 
         if (
           event ===
@@ -2029,22 +2252,6 @@ wss.on(
 
           return;
         }
-
-        // ------------------------------------------------------
-        // DTMF
-        // ------------------------------------------------------
-
-        if (
-          event ===
-          "dtmf"
-        ) {
-          console.log(
-            `[${call.id}] DTMF:`,
-            message.dtmf?.digit
-          );
-
-          return;
-        }
       }
     );
 
@@ -2052,7 +2259,7 @@ wss.on(
       "close",
       () => {
         console.log(
-          `[${call.id}] EXOTEL DISCONNECTED`
+          `[${call.id}] EXOTEL SOCKET CLOSED`
         );
 
         destroyCall(
@@ -2065,7 +2272,7 @@ wss.on(
       "error",
       error => {
         console.error(
-          `[${call.id}] EXOTEL WS ERROR:`,
+          `[${call.id}] EXOTEL SOCKET ERROR:`,
           error.message
         );
 
@@ -2092,7 +2299,7 @@ server.on(
 );
 
 // ============================================================
-// START SERVER
+// START
 // ============================================================
 
 server.listen(
@@ -2104,7 +2311,7 @@ server.listen(
     );
 
     console.log(
-      "H&M AI VOICE ASSISTANT"
+      "H&M AI PHONE ASSISTANT"
     );
 
     console.log(
@@ -2116,39 +2323,39 @@ server.listen(
     );
 
     console.log(
-      `GROQ MODEL: ${GROQ_MODEL}`
+      `GROQ: ${GROQ_MODEL}`
     );
 
     console.log(
-      `STT MODEL: ${DEEPGRAM_STT_MODEL}`
+      `PRIMARY STT: ${DEEPGRAM_PRIMARY_STT}`
     );
 
     console.log(
-      `TTS MODEL: ${DEEPGRAM_TTS_MODEL}`
+      `FALLBACK STT: ${DEEPGRAM_FALLBACK_STT}`
     );
 
     console.log(
-      `STT SAMPLE RATE: ${STT_SAMPLE_RATE}`
+      `TTS: ${DEEPGRAM_TTS_MODEL}`
     );
 
     console.log(
-      `TTS SAMPLE RATE: ${TTS_SAMPLE_RATE}`
+      "AUDIO: 16-bit PCM / 8000 Hz / MONO"
     );
 
     console.log(
-      "CUSTOMER DATABASE: ENABLED"
+      "CUSTOMER DATABASE: ON"
     );
 
     console.log(
-      "STREAMING GROQ: ENABLED"
+      "STREAMING LLM: ON"
     );
 
     console.log(
-      "STREAMING TTS: ENABLED"
+      "STREAMING TTS: ON"
     );
 
     console.log(
-      "BARGE-IN: ENABLED"
+      "BARGE-IN: ON"
     );
 
     console.log(
