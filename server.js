@@ -26,15 +26,6 @@ if (!DEEPGRAM_API_KEY) {
 const GROQ_MODEL =
   process.env.GROQ_MODEL || "llama-3.1-8b-instant";
 
-/*
- * IMPORTANT:
- * Use nova-3 only.
- *
- * The previous code tried nova-2-phonecall and nova-3 with a large
- * collection of query parameters. That made debugging difficult.
- *
- * We now use a minimal, known-good WebSocket configuration.
- */
 const DEEPGRAM_STT_MODEL =
   process.env.DEEPGRAM_STT_MODEL || "nova-3";
 
@@ -50,10 +41,8 @@ const BYTES_PER_SAMPLE = 2;
 const PCM_BYTES_PER_FRAME =
   (SAMPLE_RATE * FRAME_MS / 1000) * BYTES_PER_SAMPLE;
 
-// 120 ms initial jitter buffer.
 const START_BUFFER_FRAMES = 6;
 
-// Maximum 5 seconds queued.
 const MAX_QUEUE_BYTES =
   SAMPLE_RATE * BYTES_PER_SAMPLE * 5;
 
@@ -834,26 +823,6 @@ function openDeepgramSocket(url) {
 // ============================================================
 
 function buildSTTUrl() {
-  /*
-   * IMPORTANT:
-   *
-   * Keep this deliberately minimal.
-   *
-   * Exotel sends 8 kHz mono 16-bit PCM.
-   *
-   * We are NOT using:
-   *
-   * - nova-2-phonecall
-   * - endpointing
-   * - utterance_end_ms
-   * - smart_format
-   * - punctuate
-   *
-   * during the initial connection.
-   *
-   * This isolates the HTTP 400 problem.
-   */
-
   return (
     "wss://api.deepgram.com/v1/listen" +
     `?model=${encodeURIComponent(
@@ -877,10 +846,6 @@ async function connectSTT(call) {
 
   const url =
     buildSTTUrl();
-
-  console.log(
-    `[${call.id}] STT MODEL: ${DEEPGRAM_STT_MODEL}`
-  );
 
   const socket =
     await openDeepgramSocket(
@@ -948,11 +913,6 @@ async function connectSTT(call) {
         return;
       }
 
-      /*
-       * Interim result.
-       *
-       * We only use it for barge-in.
-       */
       if (
         message.is_final !== true
       ) {
@@ -972,21 +932,10 @@ async function connectSTT(call) {
         return;
       }
 
-      /*
-       * Final transcript.
-       */
       call.finalParts.push(
         clean
       );
 
-      /*
-       * Deepgram's speech_final is
-       * not always present in exactly
-       * the same way across models.
-       *
-       * If speech_final is true,
-       * process immediately.
-       */
       if (
         message.speech_final === true
       ) {
@@ -1041,10 +990,6 @@ async function connectSTT(call) {
     }
   );
 
-  /*
-   * Send audio that arrived while
-   * Deepgram was connecting.
-   */
   if (
     call.preSttAudio.length > 0 &&
     socket.readyState ===
@@ -1355,34 +1300,38 @@ function buildSystemPrompt(
   return `
 You are an H&M customer service assistant speaking on a real phone call.
 
-Your personality is relaxed, warm, friendly, confident and natural.
+Your personality is professional, warm, confident, helpful and natural.
 
-Speak like a helpful human customer-service employee.
+You should sound like a real H&M customer-care representative.
 
-Do not sound robotic.
+Keep every response SHORT and QUICK.
+
+Usually answer in one short sentence.
+Use two sentences only when necessary.
+
+Do not give long explanations unless the caller asks.
 
 Do not use markdown.
 
 Do not use bullet points.
 
-Do not give long explanations unless the caller asks.
+Do not repeat information unnecessarily.
 
-Usually answer in one or two short sentences.
-
-Use contractions naturally:
+Use natural contractions such as:
 "that's", "you're", "I've", "we've", "it's", "I'll".
 
 Never say:
 "Sorry, I had trouble there, could you say that again?"
 unless there is an actual technical failure.
 
-If you genuinely do not understand the caller, say:
+If you genuinely do not understand:
 "Sorry, I didn't quite catch that. Could you say that again?"
 
 The speech recognition system can occasionally confuse:
 "a dress" with "address".
 
-If the context is clothing and the caller says "address", interpret it as "a dress" when that makes sense.
+If the context is clothing and the caller says "address",
+interpret it as "a dress" when appropriate.
 
 Never mention that you are an AI.
 
@@ -1392,22 +1341,39 @@ Never mention Deepgram.
 
 Never mention Groq.
 
-Customer information:
+CUSTOMER:
 ${JSON.stringify(customer)}
 
-Available products:
+AVAILABLE PRODUCTS:
 ${JSON.stringify(PRODUCTS)}
 
-Important:
-- Use only the supplied product data.
-- Never invent prices.
-- Never invent stock.
-- Never invent orders.
-- Never invent discounts.
-- Never invent policies.
-- Help with products, prices, colors, sizes, materials, stock, carts, loyalty points, orders and delivery.
-- Keep answers short and conversational.
+You can assist with:
+product information,
+prices,
+colors,
+sizes,
+materials,
+stock,
+cart,
+orders,
+delivery,
+and loyalty points.
+
+Use ONLY the supplied customer and product information.
+
+Never invent:
+prices,
+stock,
+orders,
+discounts,
+policies,
+delivery dates,
+or product information.
+
+Keep the conversation moving quickly.
+Do not ask unnecessary follow-up questions.
 `;
+
 }
 
 // ============================================================
@@ -1424,9 +1390,9 @@ function handleDeterministicIntent(
   const customer =
     call.customer;
 
-  /*
-   * Goodbye confirmation
-   */
+  // ==========================================================
+  // GOODBYE CONFIRMATION
+  // ==========================================================
 
   if (
     call.awaitingGoodbyeConfirmation
@@ -1437,7 +1403,7 @@ function handleDeterministicIntent(
     ) {
       speakText(
         call,
-        "Thanks for calling H and M. Take care."
+        "Thank you for calling H and M. Take care."
       ).then(() => {
         setTimeout(
           () => {
@@ -1446,7 +1412,7 @@ function handleDeterministicIntent(
               "Customer confirmed call ending"
             );
           },
-          1200
+          1000
         );
       });
 
@@ -1458,18 +1424,18 @@ function handleDeterministicIntent(
 
     speakText(
       call,
-      "No problem. What else can I help you with?"
+      "Of course. What else may I help you with?"
     );
 
     return true;
   }
 
-  /*
-   * Goodbye.
-   */
+  // ==========================================================
+  // GOODBYE
+  // ==========================================================
 
   if (
-    /\b(bye|goodbye|end the call|hang up)\b/
+    /\b(bye|goodbye|end the call|hang up|that's it|thats it|nothing else|no that's all|no thats all|i'm done|im done|that's everything|thats everything)\b/
       .test(q)
   ) {
     call.awaitingGoodbyeConfirmation =
@@ -1483,9 +1449,9 @@ function handleDeterministicIntent(
     return true;
   }
 
-  /*
-   * Loyalty.
-   */
+  // ==========================================================
+  // LOYALTY
+  // ==========================================================
 
   if (
     q.includes("loyalty") ||
@@ -1506,9 +1472,9 @@ function handleDeterministicIntent(
     return true;
   }
 
-  /*
-   * Orders.
-   */
+  // ==========================================================
+  // ORDERS
+  // ==========================================================
 
   if (
     q.includes("track") ||
@@ -1532,20 +1498,18 @@ function handleDeterministicIntent(
 
     speakText(
       call,
-      `Your order ${order.id}, the ${order.color} ${order.product}, is ${order.status}. It's with ${order.courier} and is expected by ${order.estimatedDelivery}.`
+      `Your order ${order.id} is ${order.status} with ${order.courier}, and it's expected by ${order.estimatedDelivery}.`
     );
 
     return true;
   }
 
-  /*
-   * Cart.
-   */
+  // ==========================================================
+  // CART
+  // ==========================================================
 
   if (
-    q.includes(
-      "what is in my cart"
-    ) ||
+    q.includes("what is in my cart") ||
     q === "cart" ||
     q.includes("my basket")
   ) {
@@ -1572,9 +1536,9 @@ function handleDeterministicIntent(
   const quantity =
     findQuantity(text);
 
-  /*
-   * Remove item.
-   */
+  // ==========================================================
+  // REMOVE ITEM
+  // ==========================================================
 
   if (
     q.includes("remove") ||
@@ -1619,9 +1583,9 @@ function handleDeterministicIntent(
     return true;
   }
 
-  /*
-   * Add to cart.
-   */
+  // ==========================================================
+  // ADD TO CART
+  // ==========================================================
 
   if (
     q.includes("add to cart") ||
@@ -1696,9 +1660,9 @@ function handleDeterministicIntent(
     return true;
   }
 
-  /*
-   * Product questions.
-   */
+  // ==========================================================
+  // PRODUCT QUESTIONS
+  // ==========================================================
 
   if (product) {
     call.lastProductId =
@@ -1760,7 +1724,7 @@ function handleDeterministicIntent(
     ) {
       speakText(
         call,
-        `Yes, ${product.name} is in stock. It's ${formatMoney(product.price)}.`
+        `Yes, ${product.name} is in stock.`
       );
 
       return true;
@@ -1824,21 +1788,16 @@ function splitSpeakableSentences(
     working = "";
   }
 
-  /*
-   * Prevent a long unpunctuated response
-   * from waiting forever.
-   */
-
   if (
     !force &&
-    working.length > 140
+    working.length > 100
   ) {
     const cut =
       working.lastIndexOf(
         " "
       );
 
-    if (cut > 40) {
+    if (cut > 30) {
       sentences.push(
         working
           .slice(0, cut)
@@ -1971,8 +1930,9 @@ async function answerWithGroq(
         )
     },
 
+    // Smaller history = faster Groq response
     ...call.history.slice(
-      -8
+      -4
     ),
 
     {
@@ -2003,11 +1963,15 @@ async function answerWithGroq(
 
           messages,
 
+          // Lower temperature = faster,
+          // more predictable customer service answers.
           temperature:
-            0.55,
+            0.35,
 
+          // Reduced from 120.
+          // Most H&M answers only need a few words.
           max_tokens:
-            120,
+            80,
 
           stream:
             true
@@ -2158,7 +2122,7 @@ async function answerWithGroq(
 
     if (
       generation ===
-      call.responseGeneration &&
+        call.responseGeneration &&
       !call.destroyed
     ) {
       await speakText(
@@ -2297,25 +2261,14 @@ function handleCustomerSpeech(
 async function setupDeepgram(
   call
 ) {
-  /*
-   * IMPORTANT FIX:
-   *
-   * Do NOT use Promise.all().
-   *
-   * TTS is allowed to connect even if STT
-   * fails. This makes the real error visible
-   * and prevents "TTS is not connected"
-   * from masking the STT problem.
-   */
-
   try {
     console.log(
       `[${call.id}] Starting Deepgram services...`
     );
 
-    /*
-     * Connect TTS first.
-     */
+    // ========================================================
+    // TTS FIRST
+    // ========================================================
 
     try {
       call.ttsSocket =
@@ -2332,9 +2285,9 @@ async function setupDeepgram(
         null;
     }
 
-    /*
-     * Connect STT separately.
-     */
+    // ========================================================
+    // STT
+    // ========================================================
 
     try {
       call.sttSocket =
@@ -2351,19 +2304,15 @@ async function setupDeepgram(
         null;
     }
 
-    /*
-     * Start KeepAlive only if STT exists.
-     */
-
     if (call.sttSocket) {
       startKeepAlive(
         call
       );
     }
 
-    /*
-     * If TTS works, we can greet the caller.
-     */
+    // ========================================================
+    // PROFESSIONAL H&M GREETING
+    // ========================================================
 
     if (
       call.ttsSocket &&
@@ -2378,23 +2327,24 @@ async function setupDeepgram(
         call.customer?.name ||
         "there";
 
+      /*
+       * Professional but still short.
+       *
+       * The caller immediately knows:
+       * - this is H&M customer care
+       * - what we can help with
+       * - they need to choose a service
+       */
+
       await speakText(
         call,
-        `Hi ${name}, welcome to H and M. What can I help you with today?`
+        `Good day, ${name}. Welcome to H and M Customer Care. I can assist with products, orders, delivery, your cart, or loyalty points. Which service may I help you with today?`
       );
     } else {
       console.error(
         `[${call.id}] TTS unavailable.`
       );
     }
-
-    /*
-     * If STT failed, DO NOT immediately
-     * destroy the call here.
-     *
-     * We leave the call alive so the logs
-     * clearly show the actual failure.
-     */
 
     if (!call.sttSocket) {
       console.error(
@@ -2439,9 +2389,9 @@ function handleExotelMessage(
   const event =
     message.event;
 
-  /*
-   * Connected.
-   */
+  // ==========================================================
+  // CONNECTED
+  // ==========================================================
 
   if (
     event === "connected"
@@ -2453,9 +2403,9 @@ function handleExotelMessage(
     return;
   }
 
-  /*
-   * Start.
-   */
+  // ==========================================================
+  // START
+  // ==========================================================
 
   if (
     event === "start"
@@ -2497,14 +2447,6 @@ function handleExotelMessage(
         call.phone
       );
 
-    /*
-     * IMPORTANT:
-     *
-     * If Exotel gives us a +91 number,
-     * normalizePhone() converts it to the
-     * same 10-digit database number.
-     */
-
     console.log(
       `[${call.id}] EXOTEL STREAM CONNECTED`
     );
@@ -2537,14 +2479,6 @@ function handleExotelMessage(
       }`
     );
 
-    /*
-     * Log start media format if Exotel
-     * supplies it.
-     *
-     * This is extremely important for
-     * diagnosing audio format problems.
-     */
-
     const mediaFormat =
       start.media_format ||
       start.mediaFormat ||
@@ -2574,9 +2508,9 @@ function handleExotelMessage(
     return;
   }
 
-  /*
-   * Media.
-   */
+  // ==========================================================
+  // MEDIA
+  // ==========================================================
 
   if (
     event === "media"
@@ -2593,10 +2527,6 @@ function handleExotelMessage(
         payload,
         "base64"
       );
-
-    /*
-     * If STT is ready, send immediately.
-     */
 
     if (
       call.sttSocket &&
@@ -2617,13 +2547,6 @@ function handleExotelMessage(
       return;
     }
 
-    /*
-     * STT isn't connected yet.
-     *
-     * Keep only a small amount of audio
-     * to avoid memory growth.
-     */
-
     if (
       call.preSttAudio.length <
       100
@@ -2636,9 +2559,9 @@ function handleExotelMessage(
     return;
   }
 
-  /*
-   * Stop.
-   */
+  // ==========================================================
+  // STOP
+  // ==========================================================
 
   if (
     event === "stop"
@@ -2949,7 +2872,7 @@ server.listen(
     );
 
     console.log(
-      `H&M VOICE ASSISTANT STARTED`
+      "H&M VOICE ASSISTANT STARTED"
     );
 
     console.log(
